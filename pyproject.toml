@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vidimus"
+version = "0.0.1"
+description = "Verifiable custody of agent-produced records: chained manifests, dual RFC 3161 witnesses, pinned Ed25519 signatures, push attestation, chronology tiers, shrink-only waivers — one offline verification command"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [{ name = "The Axiom Foundation" }]
+classifiers = [
+    "Development Status :: 1 - Planning",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security :: Cryptography",
+]
+
+[project.urls]
+Repository = "https://github.com/TheAxiomFoundation/vidimus"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
