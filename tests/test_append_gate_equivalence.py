@@ -271,6 +271,8 @@ def release_file(root: pathlib.Path, stem: str, suffix: str) -> pathlib.Path:
 def replay_release_two(
     tree: pathlib.Path,
     destination: pathlib.Path,
+    *,
+    mutate_base: Callable[[pathlib.Path], None] | None = None,
 ) -> tuple[pathlib.Path, str]:
     """Construct base release 1, then restore the authentic release-2 append."""
 
@@ -286,6 +288,8 @@ def replay_release_two(
     ledger.write_bytes(b"".join(rows[:BASE_LINE_COUNT]))
     for suffix in RELEASE_FILE_SUFFIXES:
         release_file(root, NEW_RELEASE_STEM, suffix).unlink()
+    if mutate_base is not None:
+        mutate_base(root)
 
     base = commit_tree(root, "release 1 base")
 
@@ -426,6 +430,41 @@ def test_clean_valid_append_verdicts_match(
         "thesis-facts append check OK: 147 rows, immutable prefix 128, "
         "+2 appended vs base, release 2"
     )
+
+
+def test_candidate_base_anchor_bytes_do_not_replace_trusted_anchors(
+    append_pinned_tree: pathlib.Path,
+    tmp_path: pathlib.Path,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    anchor_relative = (
+        LEDGER_SPEC.anchor_relative
+        / LEDGER_SPEC.anchors["freetsa"].filename
+    )
+
+    def poison_candidate_base(root: pathlib.Path) -> None:
+        _flip_middle_byte(root / anchor_relative)
+
+    root, base = replay_release_two(
+        append_pinned_tree,
+        tmp_path,
+        mutate_base=poison_candidate_base,
+    )
+    assert (root / anchor_relative).read_bytes() != (
+        append_pinned_tree / anchor_relative
+    ).read_bytes()
+
+    message = _assert_accepts_identically(
+        append_pinned_tree,
+        root,
+        base,
+        capfd,
+    )
+    marker = (
+        "thesis-facts append check OK: 147 rows, immutable prefix 128, "
+        "+2 appended vs base, release 2"
+    )
+    assert message == marker
 
 
 def test_gate_only_acceptance_verdicts_match(
