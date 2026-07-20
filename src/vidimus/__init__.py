@@ -13,4 +13,4 @@ signing, push attestation with offline bundles, waiver ratchet, chronology
 tiers, and the spanning verification CLI.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.1.1"

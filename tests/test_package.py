@@ -14,7 +14,7 @@ CANONICAL_SOURCE_SHA256 = (
 
 
 def test_version() -> None:
-    assert vidimus.__version__ == "0.1.0"
+    assert vidimus.__version__ == "0.1.1"
 
 
 def test_docstring_names_landed_and_pending_extraction() -> None:
