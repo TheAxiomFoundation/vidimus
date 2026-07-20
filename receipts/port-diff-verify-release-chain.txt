@@ -1,0 +1,633 @@
+--- .extraction/ledger-0798427/scripts/verify_release_chain.py	2026-07-18 12:40:39
++++ src/vidimus/release_chain.py	2026-07-20 03:34:34
+@@ -1,5 +1,4 @@
+-#!/usr/bin/env python3
+-"""Offline verification for the witnessed thesis-ledger release chain.
++"""Offline verification for an append-only witnessed release chain.
+ 
+ The verifier treats manifest, signature, and receipt bytes as an append-only
+ journal. It does not trust manifest provenance or timestamps supplied by the
+@@ -7,24 +6,30 @@
+ append digest is recomputed from the current append-only JSONL, every manifest
+ has a valid signature from the pinned producer key, and both RFC 3161 receipts
+ are verified against separate, committed trust anchors.
++
++Extracted nearly verbatim from PolicyEngine/ledger scripts/verify_release_chain.py
++at commit 07984278503b8e06c48c539327f6f1d01c035510 (branch
++codex/thesis-ledger-facts); see receipts/ledger-pin-source-hashes.txt. The only
++intended change is parameterization: every repo-specific constant moved into
++ChainSpec, supplied by the consumer's committed code. Behavior is gated by the
++differential harness in tests/test_ledger_equivalence.py.
+ """
+ 
+ from __future__ import annotations
+ 
+-import argparse
+ import hashlib
+ import json
+ import os
+ import pathlib
+ import re
+ import subprocess
+-import sys
+ import tempfile
++from collections.abc import Mapping
+ from dataclasses import dataclass
+ from datetime import datetime, timedelta, timezone
+ from typing import Any
+ 
+-from canonical_json import canonical_bytes
++from vidimus.canonical import canonical_bytes
+ 
+ try:
+     from cryptography.exceptions import InvalidSignature, UnsupportedAlgorithm
+@@ -39,28 +44,14 @@
+ else:
+     CRYPTOGRAPHY_AVAILABLE = True
+ 
+-ROOT = pathlib.Path(__file__).resolve().parents[1]
+-MANIFEST_RELATIVE = pathlib.PurePosixPath("releases/manifests")
+-LEDGER_RELATIVE = pathlib.PurePosixPath("ledger/official_observations.jsonl")
+-PREFIX_RELATIVE = pathlib.PurePosixPath("ledger/immutable_prefix.json")
+-STATE_PATH = LEDGER_RELATIVE.as_posix()
+-SCHEMA_VERSION = "thesis_ledger_release_v1"
+ MAX_RELEASE_INDEX = 9_999
+ DEFAULT_CLOCK_SKEW_SECONDS = 300
+ MAX_FUTURE_SECONDS = 300
+ SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
+ MANIFEST_RE = re.compile(r"(?P<index>[0-9]{4})-(?P<digest>[0-9a-f]{16})\.json\Z")
+-RECEIPT_RE = re.compile(
+-    r"(?P<stem>[0-9]{4}-[0-9a-f]{16})"
+-    r"\.(?P<tsa>freetsa|digicert)\.tsr\Z"
+-)
+ PRODUCER_SIGNATURE_RE = re.compile(
+     r"(?P<stem>[0-9]{4}-[0-9a-f]{16})\.producer\.sig\Z"
+ )
+-PRODUCER_PUBLIC_KEY_FILENAME = "producer-ed25519.pub"
+-PRODUCER_SPKI_SHA256 = (
+-    "4a90eff40455ce0d853d4bab1608efbdae1efaf8c06054ead6e396c5b0c4846e"
+-)
+ PRODUCER_SIGNATURE_BYTES = 64
+ STRICT_UTC_RE = re.compile(
+     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:"
+@@ -84,32 +75,39 @@
+     signer_spki_sha256: str
+ 
+ 
+-ANCHORS = {
+-    "freetsa": AnchorSpec(
+-        filename="freetsa-root-2016.pem",
+-        pem_sha256=("2151b61137ffa86bf664691ba67e7da0b19f98c758e3d228d5d8ebf27e044438"),
+-        policy_oid="1.2.3.4.1",
+-        signer_certificate_sha256=(
+-            "32e841a95cc1164101ffde41298ef2fc75c1c4372ef095e88a6bbd47dfb191fc"
+-        ),
+-        signer_spki_sha256=(
+-            "fa02bd555e3e483d62b4e70be6218692068d2b0b0a7525db58dcbf2901cdb072"
+-        ),
+-    ),
+-    "digicert": AnchorSpec(
+-        filename="digicert-trusted-root-g4.pem",
+-        pem_sha256=("ce7d6b44f5d510391be98c8d76b18709400a30cd87659bfebe1c6f97ff5181ee"),
+-        policy_oid="2.16.840.1.114412.7.1",
+-        signer_certificate_sha256=(
+-            "4aa03fa22cd75c84c55c938f828e676b9caecab33fe36d269aa334f146110a33"
+-        ),
+-        signer_spki_sha256=(
+-            "7abda95ed7301ac94bded350babc319903d0b4f16c4e7e39346dba5f9e992b72"
+-        ),
+-    ),
+-}
++@dataclass(frozen=True)
++class ChainSpec:
++    """Repo-specific custody constants, pinned in the consumer's committed code.
+ 
++    The package ships machinery only. Every trust anchor — manifest layout,
++    schema name, producer SPKI fingerprint, TSA anchor identities — arrives
++    from the consumer's own committed code, never from package defaults, so a
++    producer can never swap a pin at runtime.
++    """
+ 
++    manifest_relative: pathlib.PurePosixPath
++    state_relative: pathlib.PurePosixPath
++    prefix_relative: pathlib.PurePosixPath
++    anchor_relative: pathlib.PurePosixPath
++    release_root_relative: pathlib.PurePosixPath
++    schema_version: str
++    producer_public_key_filename: str
++    producer_spki_sha256: str
++    anchors: Mapping[str, AnchorSpec]
++
++    @property
++    def state_path(self) -> str:
++        return self.state_relative.as_posix()
++
++
++def _receipt_re(spec: ChainSpec) -> re.Pattern[str]:
++    tsa_alternation = "|".join(re.escape(tsa) for tsa in sorted(spec.anchors))
++    return re.compile(
++        r"(?P<stem>[0-9]{4}-[0-9a-f]{16})"
++        rf"\.(?P<tsa>{tsa_alternation})\.tsr\Z"
++    )
++
++
+ class ReleaseChainError(ValueError):
+     """The release journal is malformed, inconsistent, or untrusted."""
+ 
+@@ -212,8 +210,8 @@
+     return parsed.astimezone(timezone.utc)
+ 
+ 
+-def validate_manifest_schema(manifest: Any) -> dict[str, Any]:
+-    """Validate the closed-world ``thesis_ledger_release_v1`` schema."""
++def validate_manifest_schema(manifest: Any, spec: ChainSpec) -> dict[str, Any]:
++    """Validate the closed-world release-manifest schema named by ``spec``."""
+ 
+     payload = _exact_keys(
+         manifest,
+@@ -228,7 +226,7 @@
+         },
+         "manifest",
+     )
+-    if payload["schemaVersion"] != SCHEMA_VERSION:
++    if payload["schemaVersion"] != spec.schema_version:
+         raise ReleaseChainError(
+             f"unsupported manifest schema {payload['schemaVersion']!r}"
+         )
+@@ -255,8 +253,8 @@
+         },
+         "state",
+     )
+-    if state["path"] != STATE_PATH:
+-        raise ReleaseChainError(f"state.path must be exactly {STATE_PATH!r}")
++    if state["path"] != spec.state_path:
++        raise ReleaseChainError(f"state.path must be exactly {spec.state_path!r}")
+     _sha256(state["jsonlSha256"], "state.jsonlSha256")
+     _strict_int(state["lineCount"], "state.lineCount")
+     _sha256(
+@@ -299,7 +297,9 @@
+     return payload
+ 
+ 
+-def load_manifest(path: pathlib.Path) -> tuple[dict[str, Any], bytes, str]:
++def load_manifest(
++    path: pathlib.Path, spec: ChainSpec
++) -> tuple[dict[str, Any], bytes, str]:
+     if path.is_symlink() or not path.is_file():
+         raise ReleaseChainError(f"manifest is not a regular file: {path}")
+     raw = path.read_bytes()
+@@ -315,7 +315,7 @@
+         )
+     except json.JSONDecodeError as exc:
+         raise ReleaseChainError(f"manifest is not valid JSON: {path}: {exc}") from exc
+-    payload = validate_manifest_schema(parsed)
++    payload = validate_manifest_schema(parsed, spec)
+     expected = canonical_bytes(payload) + b"\n"
+     if raw != expected:
+         raise ReleaseChainError(
+@@ -333,9 +333,11 @@
+     return f"{index:04d}-{sha256_bytes(raw)[:16]}.json"
+ 
+ 
+-def receipt_paths_for_manifest(path: pathlib.Path) -> dict[str, pathlib.Path]:
++def receipt_paths_for_manifest(
++    path: pathlib.Path, spec: ChainSpec
++) -> dict[str, pathlib.Path]:
+     stem = path.stem
+-    return {tsa: path.with_name(f"{stem}.{tsa}.tsr") for tsa in ANCHORS}
++    return {tsa: path.with_name(f"{stem}.{tsa}.tsr") for tsa in spec.anchors}
+ 
+ 
+ def producer_signature_path_for_manifest(path: pathlib.Path) -> pathlib.Path:
+@@ -343,9 +345,9 @@
+ 
+ 
+ def _enumerate_manifest_files(
+-    root: pathlib.Path,
++    root: pathlib.Path, spec: ChainSpec
+ ) -> list[tuple[pathlib.Path, dict[str, pathlib.Path], pathlib.Path]]:
+-    directory = root / MANIFEST_RELATIVE
++    directory = root / spec.manifest_relative
+     if not directory.exists():
+         return []
+     if directory.is_symlink() or not directory.is_dir():
+@@ -353,6 +355,7 @@
+             f"release manifest path is not a regular directory: {directory}"
+         )
+ 
++    receipt_re = _receipt_re(spec)
+     manifests: dict[str, pathlib.Path] = {}
+     receipts: dict[str, dict[str, pathlib.Path]] = {}
+     producer_signatures: dict[str, pathlib.Path] = {}
+@@ -365,7 +368,7 @@
+         if manifest_match is not None:
+             manifests[entry.stem] = entry
+             continue
+-        receipt_match = RECEIPT_RE.fullmatch(entry.name)
++        receipt_match = receipt_re.fullmatch(entry.name)
+         if receipt_match is not None:
+             stem = receipt_match.group("stem")
+             tsa = receipt_match.group("tsa")
+@@ -404,9 +407,10 @@
+             )
+         seen_indices[index] = path.name
+         actual_receipts = receipts.get(stem, {})
+-        if set(actual_receipts) != set(ANCHORS):
++        if set(actual_receipts) != set(spec.anchors):
+             raise ReleaseChainError(
+-                f"manifest {path.name} must have exactly freetsa and digicert "
++                f"manifest {path.name} must have exactly "
++                f"{' and '.join(spec.anchors)} "
+                 f"receipts; found={sorted(actual_receipts)}"
+             )
+         producer_signature = producer_signatures.get(stem)
+@@ -558,6 +562,7 @@
+     signature: bytes,
+     public_key_pem: bytes,
+     *,
++    spec: ChainSpec,
+     enforce_production_pin: bool,
+     label: str,
+ ) -> None:
+@@ -568,7 +573,7 @@
+         environment = _openssl_environment(empty_ca_dir)
+         manifest_path = temporary / "manifest.json"
+         signature_path = temporary / "producer.sig"
+-        public_key_path = temporary / PRODUCER_PUBLIC_KEY_FILENAME
++        public_key_path = temporary / spec.producer_public_key_filename
+         manifest_path.write_bytes(manifest)
+         signature_path.write_bytes(signature)
+         public_key_path.write_bytes(public_key_pem)
+@@ -587,7 +592,7 @@
+         )
+         if enforce_production_pin:
+             spki_sha256 = sha256_bytes(spki_der)
+-            if spki_sha256 != PRODUCER_SPKI_SHA256:
++            if spki_sha256 != spec.producer_spki_sha256:
+                 raise ReleaseChainError(
+                     "producer public-key SPKI is not code-pinned: "
+                     f"{spki_sha256}"
+@@ -620,6 +625,7 @@
+     manifest: bytes,
+     signature: bytes,
+     *,
++    spec: ChainSpec,
+     anchor_dir: pathlib.Path,
+     enforce_production_pin: bool,
+     label: str,
+@@ -634,7 +640,7 @@
+             f"producer signature for {label} must be exactly "
+             f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
+         )
+-    public_key_path = anchor_dir / PRODUCER_PUBLIC_KEY_FILENAME
++    public_key_path = anchor_dir / spec.producer_public_key_filename
+     if public_key_path.is_symlink() or not public_key_path.is_file():
+         raise ReleaseChainError(
+             f"missing or non-regular producer public key: {public_key_path}"
+@@ -646,6 +652,7 @@
+             manifest,
+             signature,
+             public_key_pem,
++            spec=spec,
+             enforce_production_pin=enforce_production_pin,
+             label=label,
+         )
+@@ -667,7 +674,7 @@
+     )
+     if enforce_production_pin:
+         spki_sha256 = sha256_bytes(spki_der)
+-        if spki_sha256 != PRODUCER_SPKI_SHA256:
++        if spki_sha256 != spec.producer_spki_sha256:
+             raise ReleaseChainError(
+                 f"producer public-key SPKI is not code-pinned: {spki_sha256}"
+             )
+@@ -683,6 +690,7 @@
+     manifest: bytes,
+     signature_path: pathlib.Path,
+     *,
++    spec: ChainSpec,
+     anchor_dir: pathlib.Path,
+     enforce_production_pin: bool,
+ ) -> None:
+@@ -693,6 +701,7 @@
+     verify_producer_signature_bytes(
+         manifest,
+         signature_path.read_bytes(),
++        spec=spec,
+         anchor_dir=anchor_dir,
+         enforce_production_pin=enforce_production_pin,
+         label=signature_path.name,
+@@ -702,7 +711,7 @@
+ def _verify_production_signer(
+     receipt: pathlib.Path,
+     anchor: pathlib.Path,
+-    spec: AnchorSpec,
++    anchor_spec: AnchorSpec,
+     gen_time: datetime,
+     temporary: pathlib.Path,
+     environment: dict[str, str],
+@@ -768,12 +777,12 @@
+     )
+     certificate_sha256 = sha256_bytes(certificate_der)
+     spki_sha256 = sha256_bytes(public_key_der)
+-    if certificate_sha256 != spec.signer_certificate_sha256:
++    if certificate_sha256 != anchor_spec.signer_certificate_sha256:
+         raise ReleaseChainError(
+             f"RFC 3161 signer certificate is not pinned for {receipt.name}: "
+             f"{certificate_sha256}"
+         )
+-    if spki_sha256 != spec.signer_spki_sha256:
++    if spki_sha256 != anchor_spec.signer_spki_sha256:
+         raise ReleaseChainError(
+             f"RFC 3161 signer SPKI is not pinned for {receipt.name}: {spki_sha256}"
+         )
+@@ -784,24 +793,25 @@
+     receipt: pathlib.Path,
+     tsa: str,
+     *,
++    spec: ChainSpec,
+     anchor_dir: pathlib.Path,
+     enforce_production_pins: bool,
+     now: datetime | None = None,
+ ) -> datetime:
+     """Cryptographically verify one receipt and return its signed genTime."""
+ 
+-    if tsa not in ANCHORS:
++    if tsa not in spec.anchors:
+         raise ReleaseChainError(f"unknown TSA receipt kind {tsa!r}")
+     _sha256(manifest_digest, "manifest digest")
+     if receipt.is_symlink() or not receipt.is_file():
+         raise ReleaseChainError(f"missing or non-regular RFC 3161 receipt: {receipt}")
+-    spec = ANCHORS[tsa]
+-    anchor = anchor_dir / spec.filename
++    anchor_spec = spec.anchors[tsa]
++    anchor = anchor_dir / anchor_spec.filename
+     if anchor.is_symlink() or not anchor.is_file():
+         raise ReleaseChainError(f"missing or non-regular TSA anchor: {anchor}")
+     if enforce_production_pins:
+         anchor_digest = sha256_bytes(anchor.read_bytes())
+-        if anchor_digest != spec.pem_sha256:
++        if anchor_digest != anchor_spec.pem_sha256:
+             raise ReleaseChainError(
+                 f"production TSA anchor bytes are not code-pinned for {tsa}: "
+                 f"{anchor_digest}"
+@@ -839,7 +849,7 @@
+                 f"(exit {text_result.returncode}): {_command_error(text_result)}"
+             )
+         gen_time, policy_oid = _parse_receipt_text(text_result.stdout, receipt)
+-        if enforce_production_pins and policy_oid != spec.policy_oid:
++        if enforce_production_pins and policy_oid != anchor_spec.policy_oid:
+             raise ReleaseChainError(
+                 f"RFC 3161 policy is not pinned for {tsa}: {policy_oid!r}"
+             )
+@@ -883,7 +893,7 @@
+             _verify_production_signer(
+                 receipt,
+                 anchor,
+-                spec,
++                anchor_spec,
+                 gen_time,
+                 temporary,
+                 environment,
+@@ -896,6 +906,7 @@
+     manifest_digest: str,
+     receipt_paths: dict[str, pathlib.Path],
+     *,
++    spec: ChainSpec,
+     anchor_dir: pathlib.Path,
+     enforce_production_pins: bool,
+     clock_skew_seconds: int,
+@@ -904,15 +915,16 @@
+ ) -> dict[str, datetime]:
+     """Verify both receipts and their chronology for one manifest."""
+ 
+-    if set(receipt_paths) != set(ANCHORS):
++    if set(receipt_paths) != set(spec.anchors):
+         raise ReleaseChainError(
+-            "release must have exactly freetsa and digicert receipt paths"
++            f"release must have exactly {' and '.join(spec.anchors)} receipt paths"
+         )
+     receipt_times = {
+         tsa: verify_receipt(
+             manifest_digest,
+             receipt_path,
+             tsa,
++            spec=spec,
+             anchor_dir=anchor_dir,
+             enforce_production_pins=enforce_production_pins,
+             now=now,
+@@ -985,11 +997,12 @@
+     records: list[ReleaseRecord],
+     root: pathlib.Path,
+     *,
++    spec: ChainSpec,
+     require_head_current: bool,
+ ) -> None:
+-    ledger = _regular_file_bytes(root, LEDGER_RELATIVE)
+-    prefix = _regular_file_bytes(root, PREFIX_RELATIVE)
+-    offsets = jsonl_line_offsets(ledger, STATE_PATH)
++    ledger = _regular_file_bytes(root, spec.state_relative)
++    prefix = _regular_file_bytes(root, spec.prefix_relative)
++    offsets = jsonl_line_offsets(ledger, spec.state_path)
+     total_lines = len(offsets) - 1
+     prefix_digest = sha256_bytes(prefix)
+ 
+@@ -1057,8 +1070,9 @@
+ 
+ 
+ def verify_release_chain(
+-    root: pathlib.Path = ROOT,
++    root: pathlib.Path,
+     *,
++    spec: ChainSpec,
+     anchor_dir: pathlib.Path | None = None,
+     require_chain: bool = True,
+     verify_state: bool = True,
+@@ -1070,14 +1084,14 @@
+     """Verify all manifests, signatures, receipts, links, and state bytes."""
+ 
+     root = root.resolve()
+-    default_anchor_dir = root / "releases" / "anchors"
++    default_anchor_dir = root / spec.anchor_relative
+     selected_anchors = (anchor_dir or default_anchor_dir).resolve()
+     if enforce_production_pins is None:
+         enforce_production_pins = selected_anchors == default_anchor_dir
+     if type(clock_skew_seconds) is not int or clock_skew_seconds < 0:
+         raise ReleaseChainError("clock_skew_seconds must be a non-negative integer")
+ 
+-    enumerated = _enumerate_manifest_files(root)
++    enumerated = _enumerate_manifest_files(root, spec)
+     if not enumerated:
+         if require_chain:
+             raise ReleaseChainError("release chain is absent; genesis is required")
+@@ -1090,7 +1104,7 @@
+     for expected_index, (path, receipt_paths, producer_signature_path) in enumerate(
+         enumerated
+     ):
+-        manifest, raw, digest = load_manifest(path)
++        manifest, raw, digest = load_manifest(path, spec)
+         filename_match = MANIFEST_RE.fullmatch(path.name)
+         assert filename_match is not None
+         filename_index = int(filename_match.group("index"))
+@@ -1116,6 +1130,7 @@
+         verify_producer_signature(
+             raw,
+             producer_signature_path,
++            spec=spec,
+             anchor_dir=selected_anchors,
+             enforce_production_pin=enforce_production_pins,
+         )
+@@ -1145,6 +1160,7 @@
+             manifest,
+             digest,
+             receipt_paths,
++            spec=spec,
+             anchor_dir=selected_anchors,
+             enforce_production_pins=enforce_production_pins,
+             clock_skew_seconds=clock_skew_seconds,
+@@ -1176,6 +1192,7 @@
+         _verify_state_history(
+             records,
+             root,
++            spec=spec,
+             require_head_current=not allow_pending_append,
+         )
+     return ChainVerification(tuple(records))
+@@ -1267,8 +1284,10 @@
+     return entry
+ 
+ 
+-def _working_release_files(root: pathlib.Path) -> dict[str, pathlib.Path]:
+-    release_root = root / "releases"
++def _working_release_files(
++    root: pathlib.Path, spec: ChainSpec
++) -> dict[str, pathlib.Path]:
++    release_root = root / spec.release_root_relative
+     if not release_root.exists():
+         return {}
+     if release_root.is_symlink() or not release_root.is_dir():
+@@ -1287,14 +1306,14 @@
+ 
+ 
+ def verify_release_history_immutable(
+-    root: pathlib.Path, base_ref: str
++    root: pathlib.Path, base_ref: str, spec: ChainSpec
+ ) -> tuple[str, set[str], dict[str, GitEntry]]:
+     """Compare every base ``releases/`` file byte and mode to the candidate."""
+ 
+     root = root.resolve()
+     commit = resolve_base_commit(root, base_ref)
+-    base_entries = git_tree_entries(root, commit, "releases")
+-    current_files = _working_release_files(root)
++    base_entries = git_tree_entries(root, commit, str(spec.release_root_relative))
++    current_files = _working_release_files(root, spec)
+     for relative, entry in base_entries.items():
+         if entry.mode not in {"100644", "100755"}:
+             raise ReleaseChainError(
+@@ -1323,9 +1342,13 @@
+     commit: str,
+     destination: pathlib.Path,
+     release_entries: dict[str, GitEntry],
++    spec: ChainSpec,
+ ) -> None:
+     entries = dict(release_entries)
+-    for relative in (LEDGER_RELATIVE.as_posix(), PREFIX_RELATIVE.as_posix()):
++    for relative in (
++        spec.state_relative.as_posix(),
++        spec.prefix_relative.as_posix(),
++    ):
+         entries[relative] = git_file_entry(root, commit, relative)
+     for relative, entry in entries.items():
+         if entry.mode not in {"100644", "100755"}:
+@@ -1342,16 +1365,18 @@
+     commit: str,
+     release_entries: dict[str, GitEntry],
+     *,
++    spec: ChainSpec,
+     anchor_dir: pathlib.Path | None = None,
+     enforce_production_pins: bool = True,
+     clock_skew_seconds: int = DEFAULT_CLOCK_SKEW_SECONDS,
+ ) -> ChainVerification:
+     with tempfile.TemporaryDirectory(prefix="thesis-release-base-") as name:
+         base_root = pathlib.Path(name)
+-        materialize_base_tree(root, commit, base_root, release_entries)
+-        base_anchor_dir = anchor_dir or (base_root / "releases" / "anchors")
++        materialize_base_tree(root, commit, base_root, release_entries, spec)
++        base_anchor_dir = anchor_dir or (base_root / spec.anchor_relative)
+         return verify_release_chain(
+             base_root,
++            spec=spec,
+             anchor_dir=base_anchor_dir,
+             require_chain=True,
+             verify_state=True,
+@@ -1362,70 +1387,3 @@
+ 
+ def _format_time(value: datetime) -> str:
+     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+-
+-
+-def main() -> int:
+-    parser = argparse.ArgumentParser(
+-        description="verify the offline thesis-ledger release journal"
+-    )
+-    parser.add_argument(
+-        "--full",
+-        action="store_true",
+-        help="require a genesis-to-HEAD chain and exact working-tree state",
+-    )
+-    parser.add_argument(
+-        "--base-ref",
+-        help="also reject any changed/deleted existing releases file vs this ref",
+-    )
+-    parser.add_argument(
+-        "--root",
+-        type=pathlib.Path,
+-        default=ROOT,
+-        help=argparse.SUPPRESS,
+-    )
+-    parser.add_argument(
+-        "--anchor-dir",
+-        type=pathlib.Path,
+-        help="override releases/anchors (intended for offline test fixtures)",
+-    )
+-    parser.add_argument(
+-        "--clock-skew-seconds",
+-        type=int,
+-        default=DEFAULT_CLOCK_SKEW_SECONDS,
+-    )
+-    args = parser.parse_args()
+-
+-    root = args.root.resolve()
+-    anchor_dir = args.anchor_dir.resolve() if args.anchor_dir else None
+-    enforce_pins = anchor_dir is None
+-    try:
+-        if args.base_ref:
+-            verify_release_history_immutable(root, args.base_ref)
+-        verification = verify_release_chain(
+-            root,
+-            anchor_dir=anchor_dir,
+-            require_chain=args.full or bool(args.base_ref),
+-            verify_state=True,
+-            enforce_production_pins=enforce_pins,
+-            clock_skew_seconds=args.clock_skew_seconds,
+-        )
+-    except (OSError, ReleaseChainError) as exc:
+-        print(f"release chain verification failed: {exc}", file=sys.stderr)
+-        return 1
+-    if not verification.releases:
+-        print("release chain absent (legacy pre-genesis state)")
+-        return 0
+-    head = verification.releases[-1]
+-    receipt_summary = ", ".join(
+-        f"{tsa}={_format_time(value)}"
+-        for tsa, value in sorted(head.receipt_times.items())
+-    )
+-    print(
+-        f"release chain OK: {len(verification.releases)} releases, "
+-        f"HEAD={head.path.name}, {receipt_summary}"
+-    )
+-    return 0
+-
+-
+-if __name__ == "__main__":
+-    raise SystemExit(main())

@@ -18,6 +18,8 @@ classifiers = [
     "Topic :: Security :: Cryptography",
 ]
 
+dependencies = ["cryptography>=42"]
+
 [project.urls]
 Repository = "https://github.com/TheAxiomFoundation/vidimus"
 
