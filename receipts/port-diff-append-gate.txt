@@ -1,0 +1,695 @@
+--- .extraction/ledger-0798427/scripts/check_thesis_facts_append.py	2026-07-18 12:40:39
++++ src/vidimus/append_gate.py	2026-07-20 08:29:01
+@@ -1,5 +1,4 @@
+-#!/usr/bin/env python3
+-"""Gate every change to the thesis-facts observation ledger.
++"""Gate every change to an append-only observation ledger.
+ 
+ The observation file is append-only with an immutable frozen prefix
+ (``ledger/immutable_prefix.json``). Resolver appends arrive as pull
+@@ -25,27 +24,33 @@
+ Usage:
+     python3 scripts/check_thesis_facts_append.py [--base-ref REF]
+ 
+-With ``--base-ref`` (CI: the pull request's base commit) the append-only
+-diff is enforced; without it only the full-file invariants run.
++With a base ref (CI: the pull request's base commit) the append-only diff is
++enforced; without it only the full-file invariants run.
++
++Extracted nearly verbatim from PolicyEngine/ledger
++scripts/check_thesis_facts_append.py at commit
++07984278503b8e06c48c539327f6f1d01c035510 (branch
++codex/thesis-ledger-facts). The only intended behavioral change is
++parameterization: every repo-specific constant moved into ``AppendGateSpec``,
++supplied by the consumer's committed code. Behavior is gated by the
++differential harness in tests/test_append_gate_equivalence.py.
+ """
+ 
+ from __future__ import annotations
+ 
+-import argparse
+ import hashlib
+ import json
+ import os
+ import pathlib
+ import re
+ import subprocess
+-import sys
++from dataclasses import dataclass
+ from typing import Any
+ 
+-from canonical_json import canonical_sha256
+-from verify_release_chain import (
+-    ANCHORS,
++from vidimus.canonical import canonical_sha256
++from vidimus.release_chain import (
++    ChainSpec,
+     MANIFEST_RE,
+-    PRODUCER_PUBLIC_KEY_FILENAME,
+     ReleaseChainError,
+     git_blob_bytes,
+     git_file_entry,
+@@ -54,52 +59,38 @@
+     verify_release_history_immutable,
+ )
+ 
+-CODE_ROOT = pathlib.Path(__file__).resolve().parents[1]
+-ROOT = CODE_ROOT
+-LEDGER_PATH = ROOT / "ledger" / "official_observations.jsonl"
+-PREFIX_PATH = ROOT / "ledger" / "immutable_prefix.json"
+-RELEASE_MANIFEST_PREFIX = "releases/manifests/"
+-GENESIS_SUPPORT_FILES = {
+-    "releases/README.md",
+-    *(f"releases/anchors/{spec.filename}" for spec in ANCHORS.values()),
+-    f"releases/anchors/{PRODUCER_PUBLIC_KEY_FILENAME}",
+-}
+ 
+-GATE_SURFACE = frozenset(
+-    {
+-        "scripts/check_thesis_facts_append.py",
+-        "scripts/verify_release_chain.py",
+-        "scripts/canonical_json.py",
+-        "scripts/cut_release_manifest.py",
+-        ".github/workflows/thesis-facts-append.yml",
+-        "releases/anchors/**",
+-    }
+-)
+-DATA_SURFACE = frozenset(
+-    {
+-        "ledger/**",
+-        "releases/manifests/**",
+-    }
+-)
++CODE_ROOT = pathlib.Path(__file__).resolve().parents[2]
+ 
+-ASSERTION_CONTENT_KEYS = (
+-    "source_record_id",
+-    "value",
+-    "observed_at",
+-    "period",
+-    "geography",
+-    "entity",
+-    "aggregation",
+-    "filters",
+-    "domain",
+-)
+ 
++@dataclass(frozen=True)
++class AppendGateSpec:
++    """Repo-specific gate constants pinned by the consuming repository."""
+ 
++    chain: ChainSpec
++    prefix_schema_version: str
++    release_manifest_prefix: str
++    genesis_support_files: frozenset[str]
++    gate_surface: frozenset[str]
++    data_surface: frozenset[str]
++    assertion_content_keys: tuple[str, ...]
++
++
++@dataclass(frozen=True)
++class _CandidateTree:
++    """Candidate-controlled paths, kept separate from the trusted code root."""
++
++    root: pathlib.Path
++    ledger_path: pathlib.Path
++    prefix_path: pathlib.Path
++    spec: AppendGateSpec
++
++
+ class AppendError(ValueError):
+     """The proposed ledger change violates an append invariant."""
+ 
+ 
+-def _set_root(root: pathlib.Path) -> None:
++def _set_root(root: pathlib.Path, spec: AppendGateSpec) -> _CandidateTree:
+     """Select the candidate worktree without changing the trusted code root.
+ 
+     Pull-request CI executes this module from a detached checkout of the base
+@@ -108,38 +99,38 @@
+     only candidate data paths and git comparisons use ``ROOT``.
+     """
+ 
+-    global ROOT, LEDGER_PATH, PREFIX_PATH
+-    ROOT = root.resolve()
+-    LEDGER_PATH = ROOT / "ledger" / "official_observations.jsonl"
+-    PREFIX_PATH = ROOT / "ledger" / "immutable_prefix.json"
++    candidate_root = root.resolve()
++    return _CandidateTree(
++        root=candidate_root,
++        ledger_path=candidate_root / spec.chain.state_relative,
++        prefix_path=candidate_root / spec.chain.prefix_relative,
++        spec=spec,
++    )
+ 
+ 
+-def _git_output(arguments: list[str]) -> bytes:
++def _git_output(arguments: list[str], candidate: _CandidateTree) -> bytes:
+     try:
+         completed = subprocess.run(
+             ["git", *arguments],
+-            cwd=ROOT,
++            cwd=candidate.root,
+             check=False,
+             capture_output=True,
+         )
+     except FileNotFoundError as exc:
+         raise AppendError("git is required for --base-ref verification") from exc
+     if completed.returncode != 0:
+-        diagnostic = completed.stderr.decode(
+-            "utf-8", errors="replace"
+-        ).strip()
+-        raise AppendError(
+-            f"git {' '.join(arguments)} failed: {diagnostic}"
+-        )
++        diagnostic = completed.stderr.decode("utf-8", errors="replace").strip()
++        raise AppendError(f"git {' '.join(arguments)} failed: {diagnostic}")
+     return completed.stdout
+ 
+ 
+-def _resolve_base_commit(base_ref: str) -> str:
++def _resolve_base_commit(base_ref: str, candidate: _CandidateTree) -> str:
+     completed = _git_output(
+-        ["rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}"]
++        ["rev-parse", "--verify", "--end-of-options", f"{base_ref}^{{commit}}"],
++        candidate,
+     )
+     commit = completed.decode("ascii").strip()
+-    _git_output(["merge-base", "--is-ancestor", commit, "HEAD"])
++    _git_output(["merge-base", "--is-ancestor", commit, "HEAD"], candidate)
+     return commit
+ 
+ 
+@@ -157,10 +148,12 @@
+     return False
+ 
+ 
+-def check_surface_separation(base_ref: str) -> tuple[set[str], set[str]]:
++def check_surface_separation(
++    base_ref: str, candidate: _CandidateTree
++) -> tuple[set[str], set[str]]:
+     """Return data/gate changes and reject a proposal that combines them."""
+ 
+-    commit = _resolve_base_commit(base_ref)
++    commit = _resolve_base_commit(base_ref, candidate)
+     changed = _nul_paths(
+         _git_output(
+             [
+@@ -172,7 +165,8 @@
+                 "--no-textconv",
+                 commit,
+                 "--",
+-            ]
++            ],
++            candidate,
+         )
+     )
+     # ``git diff`` excludes untracked files. Tests mint release siblings before
+@@ -180,15 +174,16 @@
+     changed.update(
+         _nul_paths(
+             _git_output(
+-                ["ls-files", "--others", "--exclude-standard", "-z", "--"]
++                ["ls-files", "--others", "--exclude-standard", "-z", "--"],
++                candidate,
+             )
+         )
+     )
+     data_changes = {
+-        path for path in changed if _matches_surface(path, DATA_SURFACE)
++        path for path in changed if _matches_surface(path, candidate.spec.data_surface)
+     }
+     gate_changes = {
+-        path for path in changed if _matches_surface(path, GATE_SURFACE)
++        path for path in changed if _matches_surface(path, candidate.spec.gate_surface)
+     }
+     if data_changes and gate_changes:
+         raise AppendError(
+@@ -223,7 +218,7 @@
+             )
+ 
+ 
+-def expected_assertion_version_id(row: dict[str, Any]) -> str:
++def expected_assertion_version_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
+     """Recompute the content address the resolver must have written.
+ 
+     Mirrors ``assertion_version`` in the Thesis resolver (av1 v2 spec): the ID
+@@ -237,7 +232,7 @@
+     """
+     measure = row.get("measure") or {}
+     source = row.get("source") or {}
+-    projection = {key: row.get(key) for key in ASSERTION_CONTENT_KEYS}
++    projection = {key: row.get(key) for key in spec.assertion_content_keys}
+     projection["measure"] = {
+         "concept": measure.get("concept"),
+         "unit": measure.get("unit"),
+@@ -264,7 +259,7 @@
+     return f"av2:{canonical_sha256(projection)}"
+ 
+ 
+-def _effective_assertion_id(row: dict[str, Any]) -> str:
++def _effective_assertion_id(row: dict[str, Any], spec: AppendGateSpec) -> str:
+     """Return the row's effective assertion version ID.
+ 
+     Post-cutover rows carry an explicit ``assertionVersion.id`` (validated
+@@ -276,10 +271,12 @@
+     version = row.get("assertionVersion")
+     if isinstance(version, dict) and version.get("id"):
+         return str(version["id"])
+-    return expected_assertion_version_id(row)
++    return expected_assertion_version_id(row, spec)
+ 
+ 
+-def effective_current_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
++def effective_current_rows(
++    rows: list[dict[str, Any]], spec: AppendGateSpec
++) -> list[dict[str, Any]]:
+     """Return the latest non-superseded row per assertion identity.
+ 
+     A correction names the version it replaces via
+@@ -293,12 +290,12 @@
+         version = row.get("assertionVersion")
+         if isinstance(version, dict) and version.get("supersedes"):
+             superseded.add(str(version["supersedes"]))
+-    return [row for row in rows if _effective_assertion_id(row) not in superseded]
++    return [row for row in rows if _effective_assertion_id(row, spec) not in superseded]
+ 
+ 
+-def check_prefix(lines: list[str]) -> dict[str, Any]:
+-    prefix = json.loads(PREFIX_PATH.read_text())
+-    if prefix.get("schemaVersion") != "thesis_facts_immutable_prefix_v1":
++def check_prefix(lines: list[str], candidate: _CandidateTree) -> dict[str, Any]:
++    prefix = json.loads(candidate.prefix_path.read_text())
++    if prefix.get("schemaVersion") != candidate.spec.prefix_schema_version:
+         raise AppendError(
+             f"unsupported prefix manifest schema {prefix.get('schemaVersion')!r}"
+         )
+@@ -326,7 +323,7 @@
+     return prefix
+ 
+ 
+-def check_rows(lines: list[str], prefix_count: int) -> None:
++def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> None:
+     versions: dict[str, int] = {}
+     active_by_record_id: dict[str, tuple[int, str | None]] = {}
+     for number, line in enumerate(lines, start=1):
+@@ -347,7 +344,7 @@
+         if not unit:
+             raise AppendError(f"line {number} ({record_id}) has no measure unit")
+ 
+-        recomputed = expected_assertion_version_id(row)
++        recomputed = expected_assertion_version_id(row, spec)
+         version = row.get("assertionVersion")
+         supersedes = None
+         if version is not None:
+@@ -436,11 +433,15 @@
+         active_by_record_id[str(record_id)] = (number, effective_id)
+ 
+ 
+-def check_append_only(base_ref: str, lines: list[str]) -> int:
+-    relative = LEDGER_PATH.relative_to(ROOT).as_posix()
++def check_append_only(
++    base_ref: str, lines: list[str], candidate: _CandidateTree
++) -> int:
++    relative = candidate.ledger_path.relative_to(candidate.root).as_posix()
+     try:
+         base_text = subprocess.check_output(
+-            ["git", "show", f"{base_ref}:{relative}"], cwd=ROOT, text=True
++            ["git", "show", f"{base_ref}:{relative}"],
++            cwd=candidate.root,
++            text=True,
+         )
+     except subprocess.CalledProcessError as exc:
+         raise AppendError(f"cannot read {relative} at base {base_ref}") from exc
+@@ -459,20 +460,24 @@
+     return len(lines) - len(base_lines)
+ 
+ 
+-def _manifest_at_ref(base_ref: str) -> dict[str, Any]:
+-    relative = PREFIX_PATH.relative_to(ROOT).as_posix()
++def _manifest_at_ref(base_ref: str, candidate: _CandidateTree) -> dict[str, Any]:
++    relative = candidate.prefix_path.relative_to(candidate.root).as_posix()
+     try:
+         text = subprocess.check_output(
+-            ["git", "show", f"{base_ref}:{relative}"], cwd=ROOT, text=True
++            ["git", "show", f"{base_ref}:{relative}"],
++            cwd=candidate.root,
++            text=True,
+         )
+     except subprocess.CalledProcessError as exc:
+-        raise AppendError(
+-            f"cannot read {relative} at base {base_ref}"
+-        ) from exc
++        raise AppendError(f"cannot read {relative} at base {base_ref}") from exc
+     return json.loads(text)
+ 
+ 
+-def check_prefix_anchored_to_base(base_ref: str, candidate_prefix: dict[str, Any]) -> int:
++def check_prefix_anchored_to_base(
++    base_ref: str,
++    candidate_prefix: dict[str, Any],
++    candidate: _CandidateTree,
++) -> int:
+     """Require the frozen prefix manifest to be unchanged from the base.
+ 
+     The immutable-prefix manifest lives beside the ledger and is candidate-
+@@ -484,7 +489,7 @@
+     Returns the BASE prefix line count, which callers use as the post-cutover
+     binding boundary so a candidate-controlled count can never move it.
+     """
+-    base_prefix = _manifest_at_ref(base_ref)
++    base_prefix = _manifest_at_ref(base_ref, candidate)
+     for field in ("prefixLineCount", "prefixSha256", "lineSha256s"):
+         if candidate_prefix.get(field) != base_prefix.get(field):
+             raise AppendError(
+@@ -499,6 +504,7 @@
+     new_files: set[str],
+     expected_index: int,
+     *,
++    candidate: _CandidateTree,
+     allowed_support_files: set[str] | None = None,
+ ) -> pathlib.Path:
+     """Require exactly one manifest, producer signature, and two receipts."""
+@@ -506,7 +512,7 @@
+     manifest_files = [
+         relative
+         for relative in new_files
+-        if relative.startswith(RELEASE_MANIFEST_PREFIX)
++        if relative.startswith(candidate.spec.release_manifest_prefix)
+         and MANIFEST_RE.fullmatch(pathlib.PurePosixPath(relative).name)
+     ]
+     if len(manifest_files) != 1:
+@@ -526,26 +532,30 @@
+     stem = pathlib.PurePosixPath(manifest_name).stem
+     expected = {
+         manifest_relative,
+-        *(f"{RELEASE_MANIFEST_PREFIX}{stem}.{tsa}.tsr" for tsa in ANCHORS),
+-        f"{RELEASE_MANIFEST_PREFIX}{stem}.producer.sig",
++        *(
++            f"{candidate.spec.release_manifest_prefix}{stem}.{tsa}.tsr"
++            for tsa in candidate.spec.chain.anchors
++        ),
++        f"{candidate.spec.release_manifest_prefix}{stem}.producer.sig",
+     }
+     allowed = expected | (allowed_support_files or set())
+-    if new_files != expected and not (
+-        expected <= new_files and new_files <= allowed
+-    ):
++    if new_files != expected and not (expected <= new_files and new_files <= allowed):
+         raise AppendError(
+             "release proposal must add its manifest, producer signature, and "
+-            "exactly the freetsa and digicert receipts with no other releases/ "
+-            "changes; "
++            f"exactly the {' and '.join(candidate.spec.chain.anchors)} receipts "
++            "with no other releases/ changes; "
+             f"missing={sorted(expected - new_files)}, "
+             f"extra={sorted(new_files - allowed)}"
+         )
+-    return ROOT / pathlib.PurePosixPath(manifest_relative)
++    return candidate.root / pathlib.PurePosixPath(manifest_relative)
+ 
+ 
+-def _base_ledger_bytes(commit: str) -> bytes:
+-    relative = LEDGER_PATH.relative_to(ROOT).as_posix()
+-    return git_blob_bytes(ROOT, git_file_entry(ROOT, commit, relative))
++def _base_ledger_bytes(commit: str, candidate: _CandidateTree) -> bytes:
++    relative = candidate.ledger_path.relative_to(candidate.root).as_posix()
++    return git_blob_bytes(
++        candidate.root,
++        git_file_entry(candidate.root, commit, relative),
++    )
+ 
+ 
+ def _check_exact_byte_append(base_bytes: bytes, candidate_bytes: bytes) -> bytes:
+@@ -560,6 +570,7 @@
+ def check_release_proposal(
+     base_ref: str,
+     *,
++    candidate: _CandidateTree,
+     anchor_dir: pathlib.Path | None = None,
+     enforce_production_pins: bool | None = None,
+ ) -> int | None:
+@@ -573,22 +584,30 @@
+     """
+ 
+     try:
+-        commit, new_files, base_release_entries = (
+-            verify_release_history_immutable(ROOT, base_ref)
++        commit, new_files, base_release_entries = verify_release_history_immutable(
++            candidate.root,
++            base_ref,
++            spec=candidate.spec.chain,
+         )
+     except ReleaseChainError as exc:
+         raise AppendError(str(exc)) from exc
+ 
+     base_has_chain = any(
+-        relative.startswith(RELEASE_MANIFEST_PREFIX)
++        relative.startswith(candidate.spec.release_manifest_prefix)
+         for relative in base_release_entries
+     )
+-    candidate_has_chain = any(
+-        path.is_file()
+-        for path in (ROOT / "releases" / "manifests").glob("*.json")
+-    ) if (ROOT / "releases" / "manifests").is_dir() else False
+-    base_bytes = _base_ledger_bytes(commit)
+-    candidate_bytes = LEDGER_PATH.read_bytes()
++    candidate_has_chain = (
++        any(
++            path.is_file()
++            for path in (candidate.root / candidate.spec.chain.manifest_relative).glob(
++                "*.json"
++            )
++        )
++        if (candidate.root / candidate.spec.chain.manifest_relative).is_dir()
++        else False
++    )
++    base_bytes = _base_ledger_bytes(commit, candidate)
++    candidate_bytes = candidate.ledger_path.read_bytes()
+     appended_bytes = _check_exact_byte_append(base_bytes, candidate_bytes)
+     ledger_changed = bool(appended_bytes)
+     if enforce_production_pins is None:
+@@ -607,11 +626,13 @@
+         _release_triple(
+             new_files,
+             0,
+-            allowed_support_files=GENESIS_SUPPORT_FILES,
++            candidate=candidate,
++            allowed_support_files=set(candidate.spec.genesis_support_files),
+         )
+         try:
+             verification = verify_release_chain(
+-                ROOT,
++                candidate.root,
++                spec=candidate.spec.chain,
+                 anchor_dir=anchor_dir,
+                 require_chain=True,
+                 verify_state=True,
+@@ -627,9 +648,10 @@
+ 
+     try:
+         base_verification = verify_base_release_chain(
+-            ROOT,
++            candidate.root,
+             commit,
+             base_release_entries,
++            spec=candidate.spec.chain,
+             anchor_dir=anchor_dir,
+             enforce_production_pins=enforce_production_pins,
+         )
+@@ -639,7 +661,7 @@
+     expected_index = base_verification.head.release_index + 1
+ 
+     if ledger_changed:
+-        _release_triple(new_files, expected_index)
++        _release_triple(new_files, expected_index, candidate=candidate)
+     elif new_files:
+         raise AppendError(
+             "release-only proposal is forbidden after genesis; a next release "
+@@ -648,7 +670,8 @@
+ 
+     try:
+         candidate_verification = verify_release_chain(
+-            ROOT,
++            candidate.root,
++            spec=candidate.spec.chain,
+             anchor_dir=anchor_dir,
+             require_chain=True,
+             verify_state=True,
+@@ -667,19 +690,21 @@
+ 
+ def check_release_chain_without_base(
+     *,
++    candidate: _CandidateTree,
+     anchor_dir: pathlib.Path | None = None,
+     enforce_production_pins: bool | None = None,
+ ) -> int | None:
+     """On push, verify any initialized chain against working-tree state."""
+ 
+-    manifest_directory = ROOT / "releases" / "manifests"
++    manifest_directory = candidate.root / candidate.spec.chain.manifest_relative
+     if not manifest_directory.is_dir() or not any(manifest_directory.iterdir()):
+         return None
+     if enforce_production_pins is None:
+         enforce_production_pins = anchor_dir is None
+     try:
+         verification = verify_release_chain(
+-            ROOT,
++            candidate.root,
++            spec=candidate.spec.chain,
+             anchor_dir=anchor_dir,
+             require_chain=True,
+             verify_state=True,
+@@ -691,84 +716,79 @@
+     return verification.head.release_index
+ 
+ 
+-def main() -> int:
+-    parser = argparse.ArgumentParser()
+-    parser.add_argument(
+-        "--root",
+-        type=pathlib.Path,
+-        default=CODE_ROOT,
+-        help="candidate worktree root (defaults to the checker's repository)",
+-    )
+-    parser.add_argument(
+-        "--base-ref",
+-        help="enforce an append-only diff against this git ref",
+-    )
+-    parser.add_argument(
+-        "--release-anchor-dir",
+-        type=pathlib.Path,
+-        help=argparse.SUPPRESS,
+-    )
+-    args = parser.parse_args()
+-    try:
+-        _set_root(args.root)
+-        if args.base_ref:
+-            _data_changes, gate_changes = check_surface_separation(args.base_ref)
+-            if gate_changes:
+-                print(
+-                    "thesis-facts append check OK: gate-only proposal; "
+-                    "DATA_SURFACE unchanged; GATE_SURFACE changes="
+-                    f"{sorted(gate_changes)}"
+-                )
+-                return 0
++def verify_append_gate(
++    root: pathlib.Path,
++    *,
++    spec: AppendGateSpec,
++    base_ref: str | None = None,
++    trusted_code_root: pathlib.Path = CODE_ROOT,
++    release_anchor_dir: pathlib.Path | None = None,
++) -> str:
++    """Verify one candidate tree and return the baseline CLI's success text.
+ 
+-        text = LEDGER_PATH.read_text(encoding="utf-8")
+-        reject_non_append_bytes(text)
+-        lines = _lines(text)
+-        prefix = check_prefix(lines)
+-        # The post-cutover binding boundary is the BASE prefix count under a
+-        # base ref, so a PR cannot grandfather an unbound append by growing the
+-        # candidate manifest over it. Without a base ref (push) there is nothing
+-        # to anchor against, so the candidate manifest is trusted for the
+-        # full-file invariants only — base-anchoring requires the PR path.
+-        binding_boundary = int(prefix["prefixLineCount"])
+-        appended = None
+-        if args.base_ref:
+-            binding_boundary = check_prefix_anchored_to_base(args.base_ref, prefix)
+-            appended = check_append_only(args.base_ref, lines)
+-        check_rows(lines, binding_boundary)
+-        # On the PR path, CODE_ROOT is the detached base checkout. Production
+-        # verification must use those immutable anchors and the base verifier's
+-        # pins, never files supplied by the candidate worktree. The hidden test
+-        # override remains unpinned and continues to use generated test anchors.
+-        production_pins = args.release_anchor_dir is None
+-        anchor_dir = args.release_anchor_dir or (
+-            CODE_ROOT / "releases" / "anchors"
++    The library owns no stdout or stderr. ``AppendError`` retains the baseline
++    exception text; a CLI adapter may add the original
++    ``thesis-facts append check failed: `` prefix when rendering a refusal.
++    ``trusted_code_root`` preserves the upstream split between code-owned trust
++    anchors and candidate-controlled ledger/release data.
++    """
++
++    candidate = _set_root(root, spec)
++    if base_ref:
++        _data_changes, gate_changes = check_surface_separation(
++            base_ref,
++            candidate,
+         )
+-        release_index = (
+-            check_release_proposal(
+-                args.base_ref,
+-                anchor_dir=anchor_dir,
+-                enforce_production_pins=production_pins,
++        if gate_changes:
++            return (
++                "thesis-facts append check OK: gate-only proposal; "
++                "DATA_SURFACE unchanged; GATE_SURFACE changes="
++                f"{sorted(gate_changes)}"
+             )
+-            if args.base_ref
+-            else check_release_chain_without_base(
+-                anchor_dir=anchor_dir,
+-                enforce_production_pins=production_pins,
+-            )
++
++    text = candidate.ledger_path.read_text(encoding="utf-8")
++    reject_non_append_bytes(text)
++    lines = _lines(text)
++    prefix = check_prefix(lines, candidate)
++    # The post-cutover binding boundary is the BASE prefix count under a
++    # base ref, so a PR cannot grandfather an unbound append by growing the
++    # candidate manifest over it. Without a base ref (push) there is nothing
++    # to anchor against, so the candidate manifest is trusted for the
++    # full-file invariants only — base-anchoring requires the PR path.
++    binding_boundary = int(prefix["prefixLineCount"])
++    appended = None
++    if base_ref:
++        binding_boundary = check_prefix_anchored_to_base(
++            base_ref,
++            prefix,
++            candidate,
+         )
+-    except AppendError as exc:
+-        print(f"thesis-facts append check failed: {exc}", file=sys.stderr)
+-        return 1
+-    suffix = f", +{appended} appended vs base" if appended is not None else ""
+-    release_suffix = (
+-        f", release {release_index}" if release_index is not None else ""
++        appended = check_append_only(base_ref, lines, candidate)
++    check_rows(lines, binding_boundary, spec)
++    # On the PR path, the trusted code root is the detached base checkout.
++    # Production verification must use those immutable anchors and the base
++    # verifier's pins, never files supplied by the candidate worktree. The
++    # hidden test override remains unpinned and continues to use generated
++    # test anchors.
++    production_pins = release_anchor_dir is None
++    anchor_dir = release_anchor_dir or (trusted_code_root / spec.chain.anchor_relative)
++    release_index = (
++        check_release_proposal(
++            base_ref,
++            candidate=candidate,
++            anchor_dir=anchor_dir,
++            enforce_production_pins=production_pins,
++        )
++        if base_ref
++        else check_release_chain_without_base(
++            candidate=candidate,
++            anchor_dir=anchor_dir,
++            enforce_production_pins=production_pins,
++        )
+     )
+-    print(
++    suffix = f", +{appended} appended vs base" if appended is not None else ""
++    release_suffix = f", release {release_index}" if release_index is not None else ""
++    return (
+         f"thesis-facts append check OK: {len(lines)} rows, immutable prefix "
+         f"{prefix['prefixLineCount']}{suffix}{release_suffix}"
+     )
+-    return 0
+-
+-
+-if __name__ == "__main__":
+-    raise SystemExit(main())
