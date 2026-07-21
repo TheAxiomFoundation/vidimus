@@ -52,6 +52,8 @@ import sys
 from collections.abc import Callable
 
 import pytest
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import ec
 
 from vidimus.canonical import canonical_bytes
 from vidimus.release_chain import (
@@ -62,6 +64,7 @@ from vidimus.release_chain import (
     verify_release_chain,
     verify_release_history_immutable,
 )
+from vidimus.sign import generate_signing_keypair
 
 LEDGER_PIN = "9dafe8174f42a06c00817fe596d5a8e686cb17b7"
 LEDGER_REPO_URL = "https://github.com/PolicyEngine/ledger.git"
@@ -440,6 +443,44 @@ def truncate_producer_signature(root: pathlib.Path) -> str:
     )
 
 
+def swap_producer_public_key(root: pathlib.Path) -> str:
+    """Binds the SPKI pin check: PEM decoding and the Ed25519 type check
+    succeed first, then the fresh key's SPKI is rejected before signature
+    verification."""
+
+    _, public_key_pem = generate_signing_keypair()
+    path = root / "releases" / "anchors" / "producer-ed25519.pub"
+    path.write_bytes(public_key_pem)
+    return "producer public-key SPKI is not code-pinned: "
+
+
+def corrupt_producer_public_key_pem(root: pathlib.Path) -> str:
+    """Binds PEM decoding. Flipping the first PEM-armor byte guarantees an
+    undecodable header; corrupting the base64 body could still produce a valid
+    different Ed25519 key and bind the later SPKI-pin branch instead."""
+
+    path = root / "releases" / "anchors" / "producer-ed25519.pub"
+    flip_byte(path, offset_fraction=0.0)
+    return "cannot decode producer Ed25519 public key: "
+
+
+def non_ed25519_producer_public_key(root: pathlib.Path) -> str:
+    """Binds the key-type check: valid P-256 SPKI decoding succeeds, and the
+    non-Ed25519 check fires before SPKI pinning or signature verification."""
+
+    public_key_pem = (
+        ec.generate_private_key(ec.SECP256R1())
+        .public_key()
+        .public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    path = root / "releases" / "anchors" / "producer-ed25519.pub"
+    path.write_bytes(public_key_pem)
+    return "producer public key is not Ed25519: "
+
+
 def delete_producer_signature(root: pathlib.Path) -> str:
     """Binds: missing-producer-signature check during enumeration."""
 
@@ -644,6 +685,9 @@ MUTATIONS: dict[str, Callable[[pathlib.Path], str | tuple[str, ...]]] = {
     "flip_genesis_manifest_byte": flip_genesis_manifest_byte,
     "flip_producer_signature": flip_producer_signature,
     "truncate_producer_signature": truncate_producer_signature,
+    "swap_producer_public_key": swap_producer_public_key,
+    "corrupt_producer_public_key_pem": corrupt_producer_public_key_pem,
+    "non_ed25519_producer_public_key": non_ed25519_producer_public_key,
     "delete_producer_signature": delete_producer_signature,
     "orphan_producer_signature": orphan_producer_signature,
     "flip_freetsa_receipt": flip_freetsa_receipt,

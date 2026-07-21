@@ -2,7 +2,7 @@
 
 ## State
 
-The extracted verifier is differential-green, and Layer 2 supplies in-memory Ed25519 key generation and domain-separated signing with cryptography/OpenSSL round-trip coverage.
+The extracted verifier and Layer 2 are green. The three new producer-key mutations refuse identically under the authenticated oracle and port.
 
 ## Done
 
@@ -18,8 +18,10 @@ The extracted verifier is differential-green, and Layer 2 supplies in-memory Ed2
 - Added `sign_payload` and `generate_signing_keypair`; both require cryptography and never read or store caller key material.
 - Added Layer 1–2 unit coverage for pinned and explicitly unpinned verification, exact refusal messages, domain separation, forced OpenSSL parity, key-file checks, and an independent OpenSSL CLI verification.
 - Confirmed all 9 current `tests/test_sign.py` cases pass on the cryptography and OpenSSL 3 paths.
+- Added fresh-key swap, deterministic PEM-header corruption, and valid P-256 producer-key mutations to the ledger differential battery.
+- Empirically confirmed all three markers: SPKI pin mismatch, PEM decode failure, and non-Ed25519 key type.
 
 ## Next
 
-- Add the three producer-public-key differential mutations.
 - Implement the multi-root keyring and extend `tests/test_sign.py` with threshold semantics.
+- Update package metadata and README after all capability tests pass.
