@@ -36,6 +36,7 @@ from receipt.sign import (
     read_producer_public_key,
     sign_payload,
     spki_sha256,
+    verify_any_generation,
     verify_signature_bytes,
     verify_threshold,
 )
@@ -80,7 +81,7 @@ def _outcome(callable_: Callable[[], None]) -> tuple[str, str]:
 def test_sign_round_trip_pinned_and_explicitly_unpinned() -> None:
     private_key_pem, public_key_pem = generate_signing_keypair()
     payload = b"exact payload bytes\n"
-    signature = sign_payload(private_key_pem, payload)
+    signature = sign_payload(private_key_pem, payload, domain=b"")
 
     assert type(signature) is bytes
     assert len(signature) == 64
@@ -121,7 +122,7 @@ def test_verify_refusal_messages_retain_ported_shapes() -> None:
     private_key_pem, public_key_pem = generate_signing_keypair()
     _, wrong_public_key_pem = generate_signing_keypair()
     payload = b"payload"
-    signature = sign_payload(private_key_pem, payload)
+    signature = sign_payload(private_key_pem, payload, domain=b"")
 
     with pytest.raises(SignError) as caught:
         _verify(payload, signature, wrong_public_key_pem, pin=None)
@@ -185,7 +186,7 @@ def test_verify_pin_decode_and_key_type_refusals() -> None:
     private_key_pem, public_key_pem = generate_signing_keypair()
     _, wrong_public_key_pem = generate_signing_keypair()
     payload = b"payload"
-    signature = sign_payload(private_key_pem, payload)
+    signature = sign_payload(private_key_pem, payload, domain=b"")
 
     computed_wrong_pin = _spki_pin(wrong_public_key_pem)
     with pytest.raises(SignError) as caught:
@@ -221,7 +222,7 @@ def test_unpinned_mode_is_required_and_has_no_default() -> None:
     assert parameter.default is inspect.Parameter.empty
 
     private_key_pem, public_key_pem = generate_signing_keypair()
-    signature = sign_payload(private_key_pem, b"payload")
+    signature = sign_payload(private_key_pem, b"payload", domain=b"")
     with pytest.raises(TypeError, match="spki_sha256"):
         verify_signature_bytes(  # type: ignore[call-arg]
             b"payload",
@@ -264,13 +265,13 @@ def test_sign_payload_input_and_key_refusals(
     private_key_pem, _ = generate_signing_keypair()
 
     with pytest.raises(SignError, match="^Ed25519 private key PEM must be bytes$"):
-        sign_payload(bytearray(private_key_pem), b"payload")  # type: ignore[arg-type]
+        sign_payload(bytearray(private_key_pem), b"payload", domain=b"")  # type: ignore[arg-type]
     with pytest.raises(SignError, match="^signature payload must be bytes$"):
-        sign_payload(private_key_pem, bytearray(b"payload"))  # type: ignore[arg-type]
+        sign_payload(private_key_pem, bytearray(b"payload"), domain=b"")  # type: ignore[arg-type]
     with pytest.raises(SignError, match="^signature domain must be bytes$"):
         sign_payload(private_key_pem, b"payload", domain=bytearray())  # type: ignore[arg-type]
     with pytest.raises(SignError, match="^cannot decode Ed25519 private key$"):
-        sign_payload(b"not a private key", b"payload")
+        sign_payload(b"not a private key", b"payload", domain=b"")
 
     ec_private_pem = ec.generate_private_key(ec.SECP256R1()).private_bytes(
         serialization.Encoding.PEM,
@@ -278,11 +279,11 @@ def test_sign_payload_input_and_key_refusals(
         serialization.NoEncryption(),
     )
     with pytest.raises(SignError, match="^private key is not Ed25519$"):
-        sign_payload(ec_private_pem, b"payload")
+        sign_payload(ec_private_pem, b"payload", domain=b"")
 
     monkeypatch.setattr(sign_module, "CRYPTOGRAPHY_AVAILABLE", False)
     with pytest.raises(SignError, match="^Ed25519 signing requires cryptography$"):
-        sign_payload(private_key_pem, b"payload")
+        sign_payload(private_key_pem, b"payload", domain=b"")
     with pytest.raises(
         SignError,
         match="^Ed25519 key generation requires cryptography$",
@@ -300,7 +301,7 @@ def test_forced_openssl_path_matches_stable_crypto_outcomes(
     private_key_pem, public_key_pem = generate_signing_keypair()
     _, wrong_public_key_pem = generate_signing_keypair()
     payload = b"payload"
-    signature = sign_payload(private_key_pem, payload)
+    signature = sign_payload(private_key_pem, payload, domain=b"")
     pin = _spki_pin(public_key_pem)
 
     cases = {
@@ -362,7 +363,7 @@ def test_sign_payload_cross_checks_with_openssl_cli(
 
     private_key_pem, public_key_pem = generate_signing_keypair()
     payload = b"independent OpenSSL cross-check\n"
-    signature = sign_payload(private_key_pem, payload)
+    signature = sign_payload(private_key_pem, payload, domain=b"")
     public_key_path = tmp_path / "public.pem"
     payload_path = tmp_path / "payload.bin"
     signature_path = tmp_path / "signature.bin"
@@ -555,6 +556,7 @@ def test_two_of_three_accepts_every_satisfying_subset(
         keyring,
         domain=domain,
         label="record",
+        allow_legacy=False,
     )
     assert verification == ThresholdVerification(
         satisfied=tuple(sorted(subset)),
@@ -583,6 +585,7 @@ def test_two_of_three_refuses_every_one_key_subset(key_id: str) -> None:
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
     message = str(caught.value)
     assert "threshold=2" in message
@@ -625,6 +628,7 @@ def test_duplicate_presentation_counts_one_key_once() -> None:
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
     message = str(caught.value)
     assert "satisfied=('key-a',)" in message
@@ -657,6 +661,7 @@ def test_unknown_key_id_refuses_even_when_threshold_is_met(
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
     assert str(caught.value) == "unknown key_id: 'unknown-root'"
 
@@ -682,6 +687,7 @@ def test_fingerprint_mismatch_refuses_with_computed_value_after_threshold_met() 
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
     message = str(caught.value)
     assert "public key fingerprint mismatch for 'key-c' (spki-sha256)" in message
@@ -719,6 +725,7 @@ def test_spki_and_raw_fingerprint_keyrings_verify_the_same_key() -> None:
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
         assert verification == ThresholdVerification(("root",), (), ())
 
@@ -742,6 +749,7 @@ def test_threshold_reports_failed_and_absent_keys() -> None:
         keyring,
         domain=domain,
         label="record",
+        allow_legacy=False,
     )
     assert verification == ThresholdVerification(
         ("key-a", "key-b"),
@@ -765,6 +773,7 @@ def test_threshold_reports_failed_and_absent_keys() -> None:
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
     message = str(caught.value)
     assert "satisfied=('key-a',)" in message
@@ -786,6 +795,7 @@ def test_signature_or_public_key_alone_counts_as_absent() -> None:
             keyring,
             domain=domain,
             label="record",
+            allow_legacy=False,
         )
     message = str(caught.value)
     assert "satisfied=()" in message
@@ -811,6 +821,7 @@ def test_threshold_domain_separation() -> None:
         keyring,
         domain=domain_a,
         label="record",
+        allow_legacy=False,
     ) == ThresholdVerification(("root",), (), ())
 
     with pytest.raises(SignError) as caught:
@@ -821,6 +832,7 @@ def test_threshold_domain_separation() -> None:
             keyring,
             domain=domain_b,
             label="record",
+            allow_legacy=False,
         )
     message = str(caught.value)
     assert "satisfied=()" in message
@@ -845,6 +857,7 @@ def test_threshold_requires_exact_bytes_and_explicit_domain() -> None:
             keyring,
             domain=b"",
             label="record",
+            allow_legacy=False,
         )
     with pytest.raises(SignError, match="^signature domain must be bytes$"):
         verify_threshold(
@@ -854,6 +867,7 @@ def test_threshold_requires_exact_bytes_and_explicit_domain() -> None:
             keyring,
             domain=bytearray(),  # type: ignore[arg-type]
             label="record",
+            allow_legacy=False,
         )
     with pytest.raises(TypeError, match="domain"):
         verify_threshold(  # type: ignore[call-arg]
@@ -862,4 +876,447 @@ def test_threshold_requires_exact_bytes_and_explicit_domain() -> None:
             {},
             keyring,
             label="record",
+            allow_legacy=False,
         )
+
+
+# --- key generations (0.3.0): legacy verification sets + required domains ---
+#
+# Modeled on the semantics a production rotation incident fixed upstream:
+# current keys sign and verify new material; retired keys verify immutable
+# pre-rotation history only, explicitly; malformed key material is always
+# fatal; only a clean signature mismatch under a validated key falls through
+# to an older generation.
+
+
+def test_sign_payload_requires_explicit_domain() -> None:
+    parameter = inspect.signature(sign_payload).parameters["domain"]
+    assert parameter.default is inspect.Parameter.empty
+
+    private_key_pem, _ = generate_signing_keypair()
+    with pytest.raises(TypeError, match="domain"):
+        sign_payload(private_key_pem, b"payload")  # type: ignore[call-arg]
+
+
+def test_verify_threshold_requires_explicit_allow_legacy() -> None:
+    parameter = inspect.signature(verify_threshold).parameters["allow_legacy"]
+    assert parameter.default is inspect.Parameter.empty
+
+    _, public_key_pem = generate_signing_keypair()
+    keyring = KeyringSpec(
+        (KeySpec("root", spki_sha256(public_key_pem), "spki-sha256"),),
+        threshold=1,
+    )
+    with pytest.raises(TypeError, match="allow_legacy"):
+        verify_threshold(  # type: ignore[call-arg]
+            b"",
+            {},
+            {},
+            keyring,
+            domain=b"",
+            label="record",
+        )
+    with pytest.raises(SignError, match="^allow_legacy must be a bool$"):
+        verify_threshold(
+            b"",
+            {},
+            {},
+            keyring,
+            domain=b"",
+            label="record",
+            allow_legacy=1,  # type: ignore[arg-type]
+        )
+
+
+def _rotated_keyring() -> tuple[
+    dict[str, tuple[bytes, bytes]],
+    KeyringSpec,
+]:
+    """One current key ("new-root") over one retired key ("old-root")."""
+
+    material = {
+        "new-root": generate_signing_keypair(),
+        "old-root": generate_signing_keypair(),
+    }
+    keyring = KeyringSpec(
+        keys=(
+            KeySpec("new-root", spki_sha256(material["new-root"][1]), "spki-sha256"),
+        ),
+        threshold=1,
+        legacy_keys=(
+            KeySpec("old-root", spki_sha256(material["old-root"][1]), "spki-sha256"),
+        ),
+    )
+    return material, keyring
+
+
+def test_keyring_legacy_construction_refusals() -> None:
+    current = KeySpec("root", "fp-current", "spki-sha256")
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(
+            (current,),
+            1,
+            legacy_keys=(KeySpec("root", "fp-old", "spki-sha256"),),
+        )
+    assert str(caught.value) == "duplicate key_id in keyring: 'root'"
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(
+            (current,),
+            1,
+            legacy_keys=(KeySpec("old", "fp-current", "raw-sha256"),),
+        )
+    assert str(caught.value) == "duplicate fingerprint in keyring: 'fp-current'"
+
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(
+            (current,),
+            1,
+            legacy_keys=(
+                KeySpec("old-a", "fp-old", "spki-sha256"),
+                KeySpec("old-b", "fp-old", "spki-sha256"),
+            ),
+        )
+    assert str(caught.value) == "duplicate fingerprint in keyring: 'fp-old'"
+
+    # Threshold is defined over current keys alone; legacy keys never raise it.
+    with pytest.raises(SignError) as caught:
+        KeyringSpec(
+            (current,),
+            2,
+            legacy_keys=(KeySpec("old", "fp-old", "spki-sha256"),),
+        )
+    assert str(caught.value) == "keyring threshold 2 exceeds key count 1"
+
+
+def test_legacy_key_refused_for_new_material() -> None:
+    material, keyring = _rotated_keyring()
+    payload = b"new material"
+    domain = b"consumer/v1\0"
+    signature = sign_payload(material["old-root"][0], payload, domain=domain)
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {"old-root": signature},
+            {"old-root": material["old-root"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
+
+    # Supplying only the legacy PUBLIC KEY (no signature) refuses identically:
+    # a legacy key has no business anywhere near new-material verification.
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {},
+            {"old-root": material["old-root"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=False,
+        )
+    assert str(caught.value) == "legacy key_id refused for new material: 'old-root'"
+
+
+def test_legacy_counts_for_history_and_is_reported() -> None:
+    material, keyring = _rotated_keyring()
+    payload = b"immutable pre-rotation artifact"
+    domain = b"consumer/v1\0"
+    signature = sign_payload(material["old-root"][0], payload, domain=domain)
+
+    verification = verify_threshold(
+        payload,
+        {"old-root": signature},
+        {"old-root": material["old-root"][1]},
+        keyring,
+        domain=domain,
+        label="record",
+        allow_legacy=True,
+    )
+    assert verification == ThresholdVerification(
+        satisfied=("old-root",),
+        failed=(),
+        absent=("new-root",),
+        legacy_satisfied=("old-root",),
+    )
+
+    # A current-key signature on history reports no legacy involvement.
+    current_signature = sign_payload(material["new-root"][0], payload, domain=domain)
+    verification = verify_threshold(
+        payload,
+        {"new-root": current_signature},
+        {"new-root": material["new-root"][1]},
+        keyring,
+        domain=domain,
+        label="record",
+        allow_legacy=True,
+    )
+    assert verification == ThresholdVerification(
+        satisfied=("new-root",),
+        failed=(),
+        absent=("old-root",),
+        legacy_satisfied=(),
+    )
+
+
+def test_duplicate_key_material_refused() -> None:
+    private_key_pem, public_key_pem = generate_signing_keypair()
+    raw_public_key = _raw_public_key(public_key_pem)
+    payload = b"payload"
+    domain = b"consumer/v1\0"
+    signature = sign_payload(private_key_pem, payload, domain=domain)
+    # Same physical key pinned as current (spki scheme) AND legacy (raw
+    # scheme): fingerprints differ, so construction passes — the material-level
+    # duplicate must be caught when the keys are supplied.
+    keyring = KeyringSpec(
+        keys=(KeySpec("current", spki_sha256(public_key_pem), "spki-sha256"),),
+        threshold=1,
+        legacy_keys=(
+            KeySpec("shadow", raw_public_key_sha256(public_key_pem), "raw-sha256"),
+        ),
+    )
+
+    with pytest.raises(SignError) as caught:
+        verify_threshold(
+            payload,
+            {"current": signature},
+            {"current": public_key_pem, "shadow": raw_public_key},
+            keyring,
+            domain=domain,
+            label="record",
+            allow_legacy=True,
+        )
+    assert str(caught.value) == (
+        "duplicate key material presented for 'current' and 'shadow'"
+    )
+
+
+def test_verify_any_generation_current_first_then_legacy() -> None:
+    material, keyring = _rotated_keyring()
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+    public_keys = {
+        "new-root": material["new-root"][1],
+        "old-root": material["old-root"][1],
+    }
+
+    current_signature = sign_payload(material["new-root"][0], payload, domain=domain)
+    assert (
+        verify_any_generation(
+            payload,
+            current_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+        == "new-root"
+    )
+
+    legacy_signature = sign_payload(material["old-root"][0], payload, domain=domain)
+    assert (
+        verify_any_generation(
+            payload,
+            legacy_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+        == "old-root"
+    )
+
+    # A signature by an unrelated key exhausts every generation; the refusal
+    # lists the try order: current first, then legacy.
+    stranger_private, _ = generate_signing_keypair()
+    stranger_signature = sign_payload(stranger_private, payload, domain=domain)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            stranger_signature,
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert str(caught.value) == (
+        "signature does not verify under any keyring generation for record: "
+        "tried=['new-root', 'old-root']"
+    )
+
+
+def test_verify_any_generation_malformed_is_fatal() -> None:
+    material, keyring = _rotated_keyring()
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+    legacy_signature = sign_payload(material["old-root"][0], payload, domain=domain)
+    public_keys = {
+        "new-root": material["new-root"][1],
+        "old-root": material["old-root"][1],
+    }
+
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            legacy_signature[:-1],
+            public_keys,
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert str(caught.value) == (
+        "signature for record must be exactly 64 raw bytes; found=63"
+    )
+
+    # Mispinned CURRENT key while the LEGACY key would cleanly verify: fatal.
+    # Bad key material is never skipped in favor of a key that vouches (the
+    # regression a production rotation review caught).
+    _, wrong_public_key = generate_signing_keypair()
+    computed = spki_sha256(wrong_public_key)
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            legacy_signature,
+            {"new-root": wrong_public_key, "old-root": material["old-root"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert str(caught.value) == (
+        "public key fingerprint mismatch for 'new-root' (spki-sha256): "
+        f"expected={keyring.keys[0].fingerprint}, computed={computed}"
+    )
+
+
+def test_verify_any_generation_requires_material_and_threshold_one() -> None:
+    material, keyring = _rotated_keyring()
+    payload = b"artifact"
+    domain = b"consumer/v1\0"
+    signature = sign_payload(material["new-root"][0], payload, domain=domain)
+
+    with pytest.raises(SignError) as caught:
+        verify_any_generation(
+            payload,
+            signature,
+            {"new-root": material["new-root"][1]},
+            keyring,
+            domain=domain,
+            label="record",
+        )
+    assert str(caught.value) == (
+        "verify_any_generation requires key material for every keyring key; "
+        "missing=['old-root']"
+    )
+
+    with pytest.raises(SignError, match="^unknown key_id: 'stranger'$"):
+        verify_any_generation(
+            payload,
+            signature,
+            {
+                "new-root": material["new-root"][1],
+                "old-root": material["old-root"][1],
+                "stranger": material["new-root"][1],
+            },
+            keyring,
+            domain=domain,
+            label="record",
+        )
+
+    wide = KeyringSpec(
+        keys=(
+            KeySpec("a", "fp-a", "spki-sha256"),
+            KeySpec("b", "fp-b", "spki-sha256"),
+        ),
+        threshold=2,
+    )
+    with pytest.raises(
+        SignError,
+        match="^verify_any_generation requires a threshold-1 keyring; found=2$",
+    ):
+        verify_any_generation(
+            payload,
+            signature,
+            {},
+            wide,
+            domain=domain,
+            label="record",
+        )
+
+
+def test_rotation_round_trip_story() -> None:
+    """The corpus-shaped lifecycle: sign, rotate, history stays verifiable."""
+
+    domain = b"consumer/v1\0"
+    first_private, first_public = generate_signing_keypair()
+    artifact = b"released under the first key"
+    artifact_signature = sign_payload(first_private, artifact, domain=domain)
+
+    ring_v1 = KeyringSpec(
+        (KeySpec("root-2026a", spki_sha256(first_public), "spki-sha256"),),
+        threshold=1,
+    )
+    assert (
+        verify_any_generation(
+            artifact,
+            artifact_signature,
+            {"root-2026a": first_public},
+            ring_v1,
+            domain=domain,
+            label="release",
+        )
+        == "root-2026a"
+    )
+
+    # Rotation: reviewed replacement moves the retired key into legacy_keys.
+    second_private, second_public = generate_signing_keypair()
+    ring_v2 = KeyringSpec(
+        keys=(KeySpec("root-2026b", spki_sha256(second_public), "spki-sha256"),),
+        threshold=1,
+        legacy_keys=(
+            KeySpec("root-2026a", spki_sha256(first_public), "spki-sha256"),
+        ),
+    )
+    both_keys = {"root-2026a": first_public, "root-2026b": second_public}
+
+    # Immutable history remains verifiable, attributed to the retired key.
+    assert (
+        verify_any_generation(
+            artifact,
+            artifact_signature,
+            both_keys,
+            ring_v2,
+            domain=domain,
+            label="release",
+        )
+        == "root-2026a"
+    )
+
+    # New material must come from the current key.
+    fresh = b"released after rotation"
+    with pytest.raises(SignError):
+        verify_threshold(
+            fresh,
+            {"root-2026a": sign_payload(first_private, fresh, domain=domain)},
+            {"root-2026a": first_public},
+            ring_v2,
+            domain=domain,
+            label="release",
+            allow_legacy=False,
+        )
+    fresh_signature = sign_payload(second_private, fresh, domain=domain)
+    verification = verify_threshold(
+        fresh,
+        {"root-2026b": fresh_signature},
+        {"root-2026b": second_public},
+        ring_v2,
+        domain=domain,
+        label="release",
+        allow_legacy=False,
+    )
+    assert verification.satisfied == ("root-2026b",)
+    assert verification.legacy_satisfied == ()

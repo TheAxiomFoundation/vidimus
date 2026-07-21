@@ -14,4 +14,4 @@ with offline bundles, waiver ratchet, chronology tiers, and the spanning
 verification CLI.
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
