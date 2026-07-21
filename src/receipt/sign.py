@@ -6,7 +6,13 @@ keys are always supplied by the caller; this package neither stores key
 material nor reads trust configuration from the environment.
 
 Keyrings follow loud rotation: the keyring is an object committed in consumer
-code, and rotation is a reviewed replacement of that object. There are no
+code, and rotation is a reviewed replacement of that object that moves the
+retired key into ``legacy_keys``. Legacy keys can vouch only where the caller
+explicitly verifies immutable pre-rotation history (``allow_legacy=True``, or
+``verify_any_generation`` for envelopes whose key identifier does not name the
+signing generation); they are refused loudly for new material, malformed key
+material is always fatal, and only a clean signature mismatch under a
+validated key falls through to an older generation. There are no time-based
 transition windows. Keys outside the committed keyring are refused, and
 unknown fingerprints are surfaced verbatim in refusals.
 """
@@ -254,9 +260,14 @@ def sign_payload(
     private_key_pem: bytes,
     payload: bytes,
     *,
-    domain: bytes = b"",
+    domain: bytes,
 ) -> bytes:
-    """Return a raw Ed25519 signature over ``domain + payload``."""
+    """Return a raw Ed25519 signature over ``domain + payload``.
+
+    ``domain`` is required so every signing call names its role explicitly;
+    a consumer that signs exact bytes with no domain states ``domain=b""``
+    deliberately rather than by omission.
+    """
 
     if type(private_key_pem) is not bytes:
         raise SignError("Ed25519 private key PEM must be bytes")
@@ -344,8 +355,17 @@ class KeySpec:
 
 @dataclass(frozen=True)
 class KeyringSpec:
+    """Current trust generation plus retired verification-only generations.
+
+    ``keys`` are the current generation: they sign and verify new material,
+    and ``threshold`` is defined over them. ``legacy_keys`` are retired keys
+    kept only so immutable pre-rotation history stays verifiable; they never
+    satisfy anything unless the caller explicitly allows them.
+    """
+
     keys: tuple[KeySpec, ...]
     threshold: int
+    legacy_keys: tuple[KeySpec, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.keys:
@@ -361,7 +381,7 @@ class KeyringSpec:
             )
         seen_key_ids: set[str] = set()
         seen_fingerprints: set[str] = set()
-        for key in self.keys:
+        for key in (*self.keys, *self.legacy_keys):
             if key.key_id in seen_key_ids:
                 raise SignError(f"duplicate key_id in keyring: {key.key_id!r}")
             if key.fingerprint in seen_fingerprints:
@@ -377,6 +397,7 @@ class ThresholdVerification:
     satisfied: tuple[str, ...]
     failed: tuple[str, ...]
     absent: tuple[str, ...]
+    legacy_satisfied: tuple[str, ...] = ()
 
 
 def _key_fingerprint(public_key: Ed25519PublicKey, scheme: str) -> str:
@@ -390,28 +411,20 @@ def _key_fingerprint(public_key: Ed25519PublicKey, scheme: str) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def verify_threshold(
-    payload: bytes,
-    signatures: Mapping[str, bytes],
+def _normalize_pinned_public_keys(
     public_keys: Mapping[str, bytes],
-    keyring: KeyringSpec,
-    *,
-    domain: bytes,
-    label: str,
-) -> ThresholdVerification:
-    """Verify a closed-world threshold over ``domain + payload``."""
+    specs: Mapping[str, KeySpec],
+) -> dict[str, Ed25519PublicKey]:
+    """Fingerprint-check every supplied key and refuse duplicate material.
 
-    if type(payload) is not bytes:
-        raise SignError("signature payload must be bytes")
-    if type(domain) is not bytes:
-        raise SignError("signature domain must be bytes")
-
-    specs = {key.key_id: key for key in keyring.keys}
-    unknown_key_ids = sorted((set(signatures) | set(public_keys)) - set(specs))
-    if unknown_key_ids:
-        raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
+    Malformed or mispinned key material is always fatal here — it is never
+    skipped in favor of a key that happens to verify (the failure mode a
+    production rotation review caught: a bad key silently ignored because a
+    sibling key vouched).
+    """
 
     normalized_public_keys: dict[str, Ed25519PublicKey] = {}
+    seen_material: dict[bytes, str] = {}
     for key_id in sorted(set(public_keys)):
         key_spec = specs[key_id]
         normalized = _load_ed25519_public_key(public_keys[key_id])
@@ -422,13 +435,69 @@ def verify_threshold(
                 f"({key_spec.scheme}): expected={key_spec.fingerprint}, "
                 f"computed={computed}"
             )
+        raw = normalized.public_bytes(Encoding.Raw, PublicFormat.Raw)
+        if raw in seen_material:
+            first, second = sorted((seen_material[raw], key_id))
+            raise SignError(
+                f"duplicate key material presented for {first!r} and {second!r}"
+            )
+        seen_material[raw] = key_id
         normalized_public_keys[key_id] = normalized
+    return normalized_public_keys
 
+
+def verify_threshold(
+    payload: bytes,
+    signatures: Mapping[str, bytes],
+    public_keys: Mapping[str, bytes],
+    keyring: KeyringSpec,
+    *,
+    domain: bytes,
+    label: str,
+    allow_legacy: bool,
+) -> ThresholdVerification:
+    """Verify a closed-world threshold over ``domain + payload``.
+
+    ``allow_legacy`` is required at every call site: verification of new
+    material says ``False`` and refuses any keyring-legacy key loudly;
+    verification of immutable pre-rotation history says ``True`` and legacy
+    keys count toward the threshold (reported in ``legacy_satisfied``).
+    """
+
+    if type(payload) is not bytes:
+        raise SignError("signature payload must be bytes")
+    if type(domain) is not bytes:
+        raise SignError("signature domain must be bytes")
+    if type(allow_legacy) is not bool:
+        raise SignError("allow_legacy must be a bool")
+
+    legacy_ids = {key.key_id for key in keyring.legacy_keys}
+    specs = {
+        key.key_id: key for key in (*keyring.keys, *keyring.legacy_keys)
+    }
+    unknown_key_ids = sorted((set(signatures) | set(public_keys)) - set(specs))
+    if unknown_key_ids:
+        raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
+    if not allow_legacy:
+        presented_legacy = sorted(
+            (set(signatures) | set(public_keys)) & legacy_ids
+        )
+        if presented_legacy:
+            raise SignError(
+                f"legacy key_id refused for new material: {presented_legacy[0]!r}"
+            )
+
+    normalized_public_keys = _normalize_pinned_public_keys(public_keys, specs)
+
+    eligible = (
+        (*keyring.keys, *keyring.legacy_keys) if allow_legacy else keyring.keys
+    )
     message = domain + payload
     satisfied: list[str] = []
     failed: list[str] = []
     absent: list[str] = []
-    for key_spec in keyring.keys:
+    legacy_satisfied: list[str] = []
+    for key_spec in eligible:
         key_id = key_spec.key_id
         if key_id not in signatures or key_id not in normalized_public_keys:
             absent.append(key_id)
@@ -443,11 +512,14 @@ def verify_threshold(
             failed.append(key_id)
         else:
             satisfied.append(key_id)
+            if key_id in legacy_ids:
+                legacy_satisfied.append(key_id)
 
     verification = ThresholdVerification(
         satisfied=tuple(sorted(satisfied)),
         failed=tuple(sorted(failed)),
         absent=tuple(sorted(absent)),
+        legacy_satisfied=tuple(sorted(legacy_satisfied)),
     )
     if len(verification.satisfied) < keyring.threshold:
         raise SignError(
@@ -457,3 +529,67 @@ def verify_threshold(
             f"failed={verification.failed}; absent={verification.absent}"
         )
     return verification
+
+
+def verify_any_generation(
+    payload: bytes,
+    signature: bytes,
+    public_keys: Mapping[str, bytes],
+    keyring: KeyringSpec,
+    *,
+    domain: bytes,
+    label: str,
+) -> str:
+    """Verify one signature against the current generation, then each legacy.
+
+    For single-signature envelopes whose key identifier does not name the
+    signing generation (the artifact is immutable history; the keyring has
+    rotated under it). Current keys are tried first in declaration order,
+    then legacy keys in declaration order. Key material is required for every
+    keyring key and is fingerprint-checked up front; malformed input of any
+    kind is immediately fatal, and only a clean signature mismatch under a
+    validated key falls through to the next generation. Returns the key_id
+    that vouched, so consumers log which generation verified the artifact.
+    """
+
+    if keyring.threshold != 1:
+        raise SignError(
+            "verify_any_generation requires a threshold-1 keyring; "
+            f"found={keyring.threshold}"
+        )
+    if type(payload) is not bytes:
+        raise SignError("signature payload must be bytes")
+    if type(domain) is not bytes:
+        raise SignError("signature domain must be bytes")
+    if type(signature) is not bytes or len(signature) != PRODUCER_SIGNATURE_BYTES:
+        actual = len(signature) if isinstance(signature, bytes) else "non-bytes"
+        raise SignError(
+            f"signature for {label} must be exactly "
+            f"{PRODUCER_SIGNATURE_BYTES} raw bytes; found={actual}"
+        )
+
+    ordered = (*keyring.keys, *keyring.legacy_keys)
+    specs = {key.key_id: key for key in ordered}
+    unknown_key_ids = sorted(set(public_keys) - set(specs))
+    if unknown_key_ids:
+        raise SignError(f"unknown key_id: {unknown_key_ids[0]!r}")
+    missing = sorted(set(specs) - set(public_keys))
+    if missing:
+        raise SignError(
+            "verify_any_generation requires key material for every keyring "
+            f"key; missing={missing}"
+        )
+
+    normalized_public_keys = _normalize_pinned_public_keys(public_keys, specs)
+
+    message = domain + payload
+    for key_spec in ordered:
+        try:
+            normalized_public_keys[key_spec.key_id].verify(signature, message)
+        except InvalidSignature:
+            continue
+        return key_spec.key_id
+    raise SignError(
+        f"signature does not verify under any keyring generation for {label}: "
+        f"tried={[key.key_id for key in ordered]}"
+    )
