@@ -28,13 +28,13 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from vidimus import sign as _sign
-from vidimus.canonical import canonical_bytes
+from receipt import sign as _sign
+from receipt.canonical import canonical_bytes
 
 # One availability gate for the whole package: producer-signature verification
-# lives in vidimus.sign, and this module's only remaining cryptography use is
+# lives in receipt.sign, and this module's only remaining cryptography use is
 # choosing between sign's cryptography and OpenSSL 3 CLI paths.
-from vidimus.sign import CRYPTOGRAPHY_AVAILABLE, SignError, _openssl_environment
+from receipt.sign import CRYPTOGRAPHY_AVAILABLE, SignError, _openssl_environment
 
 MAX_RELEASE_INDEX = 9_999
 DEFAULT_CLOCK_SKEW_SECONDS = 300

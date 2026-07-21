@@ -1,7 +1,7 @@
 """Differential harness: the port must reproduce the ledger verifier exactly.
 
 Baseline = PolicyEngine/ledger scripts/verify_release_chain.py, unmodified, at
-the pinned commit. Candidate = vidimus.release_chain with LEDGER_SPEC (the
+the pinned commit. Candidate = receipt.release_chain with LEDGER_SPEC (the
 consumer pin, committed here). Equivalence is judged on the live chain, on a
 mutation battery, and on the --base-ref immutability surface: for every
 mutation both verifiers must refuse, and their refusals must match byte for
@@ -34,7 +34,7 @@ The harness asserts the marker is present, so a mutation that silently starts
 dying at a different (earlier) check fails loudly instead of degrading into
 a duplicate of another test.
 
-The pinned tree resolves from VIDIMUS_LEDGER_TREE, then the local extraction
+The pinned tree resolves from RECEIPT_LEDGER_TREE, then the local extraction
 workspace, then a fresh clone of the public repo at the pin (CI path). In
 every case the baseline oracle script is authenticated against its recorded
 SHA-256 before it is trusted (receipts/ledger-pin-source-hashes.txt).
@@ -55,8 +55,8 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from vidimus.canonical import canonical_bytes
-from vidimus.release_chain import (
+from receipt.canonical import canonical_bytes
+from receipt.release_chain import (
     AnchorSpec,
     ChainSpec,
     ReleaseChainError,
@@ -64,7 +64,7 @@ from vidimus.release_chain import (
     verify_release_chain,
     verify_release_history_immutable,
 )
-from vidimus.sign import generate_signing_keypair
+from receipt.sign import generate_signing_keypair
 
 LEDGER_PIN = "9dafe8174f42a06c00817fe596d5a8e686cb17b7"
 LEDGER_REPO_URL = "https://github.com/PolicyEngine/ledger.git"
@@ -165,11 +165,11 @@ def _authenticated_baseline_tree(tree: pathlib.Path) -> pathlib.Path:
 
 @pytest.fixture(scope="session")
 def pinned_tree(tmp_path_factory: pytest.TempPathFactory) -> pathlib.Path:
-    override = os.environ.get("VIDIMUS_LEDGER_TREE")
+    override = os.environ.get("RECEIPT_LEDGER_TREE")
     if override:
         tree = pathlib.Path(override)
         if not tree.is_dir():
-            raise RuntimeError(f"VIDIMUS_LEDGER_TREE is not a directory: {tree}")
+            raise RuntimeError(f"RECEIPT_LEDGER_TREE is not a directory: {tree}")
         return _authenticated_baseline_tree(tree)
     local = (
         pathlib.Path(__file__).resolve().parents[1]

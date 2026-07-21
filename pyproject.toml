@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "vidimus"
+name = "receipt"
 version = "0.2.0"
 description = "Verifiable custody of agent-produced records: chained manifests, dual RFC 3161 witnesses, pinned Ed25519 signatures, push attestation, chronology tiers, shrink-only waivers — one offline verification command"
 readme = "README.md"
@@ -21,7 +21,7 @@ classifiers = [
 dependencies = ["cryptography>=42"]
 
 [project.urls]
-Repository = "https://github.com/TheAxiomFoundation/vidimus"
+Repository = "https://github.com/TheAxiomFoundation/receipt"
 
 [dependency-groups]
 dev = ["pytest>=8"]

@@ -3,7 +3,7 @@
 import hashlib
 import pathlib
 
-import vidimus
+import receipt
 
 # canonical.py is a byte-identical copy of the pinned source file; this hash
 # is scripts/canonical_json.py at PolicyEngine/ledger commit 0798427850
@@ -14,17 +14,17 @@ CANONICAL_SOURCE_SHA256 = (
 
 
 def test_version() -> None:
-    assert vidimus.__version__ == "0.2.0"
+    assert receipt.__version__ == "0.2.0"
 
 
 def test_docstring_names_landed_and_pending_extraction() -> None:
     # The package must not claim capability it does not have: the docstring
     # names exactly what has landed and what is still pending.
-    assert "Pending extraction" in vidimus.__doc__
-    assert "release-chain verifier" in vidimus.__doc__
+    assert "Pending extraction" in receipt.__doc__
+    assert "release-chain verifier" in receipt.__doc__
 
 
 def test_canonical_module_is_byte_identical_to_pinned_source() -> None:
-    module_path = pathlib.Path(vidimus.__file__).parent / "canonical.py"
+    module_path = pathlib.Path(receipt.__file__).parent / "canonical.py"
     digest = hashlib.sha256(module_path.read_bytes()).hexdigest()
     assert digest == CANONICAL_SOURCE_SHA256

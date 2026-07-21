@@ -47,8 +47,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Any
 
-from vidimus.canonical import canonical_sha256
-from vidimus.release_chain import (
+from receipt.canonical import canonical_sha256
+from receipt.release_chain import (
     ChainSpec,
     MANIFEST_RE,
     ReleaseChainError,
@@ -394,7 +394,7 @@ def check_rows(lines: list[str], prefix_count: int, spec: AppendGateSpec) -> Non
             # Key PRESENCE pairs the binding, and present values must be
             # shape-valid: truthiness accepted targetContentHash "" with a
             # missing (or {}) projection, silently waiving the contract
-            # binding (found during the vidimus extraction review).
+            # binding (found during the extraction review).
             has_hash = "targetContentHash" in row
             has_projection = "sourceBindingProjection" in row
             if has_hash != has_projection:

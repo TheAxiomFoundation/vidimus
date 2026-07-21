@@ -1,7 +1,7 @@
 """Differential harness: the extracted append gate must match its oracle.
 
 Baseline = PolicyEngine/ledger scripts/check_thesis_facts_append.py, run
-unmodified at the pinned commit. Candidate = vidimus.append_gate with the
+unmodified at the pinned commit. Candidate = receipt.append_gate with the
 consumer-pinned ``APPEND_GATE_SPEC`` below, which composes the same
 ``LEDGER_SPEC`` used by the release-chain differential harness.
 
@@ -42,13 +42,13 @@ from collections.abc import Callable
 import pytest
 
 from test_ledger_equivalence import LEDGER_SPEC
-from vidimus.append_gate import (
+from receipt.append_gate import (
     AppendError,
     AppendGateSpec,
     expected_assertion_version_id,
     verify_append_gate,
 )
-from vidimus.canonical import canonical_bytes
+from receipt.canonical import canonical_bytes
 
 LEDGER_PIN = "9dafe8174f42a06c00817fe596d5a8e686cb17b7"
 LEDGER_REPO_URL = "https://github.com/PolicyEngine/ledger.git"
@@ -140,11 +140,11 @@ def _authenticated_baseline_tree(tree: pathlib.Path) -> pathlib.Path:
 def append_pinned_tree(
     tmp_path_factory: pytest.TempPathFactory,
 ) -> pathlib.Path:
-    override = os.environ.get("VIDIMUS_LEDGER_TREE")
+    override = os.environ.get("RECEIPT_LEDGER_TREE")
     if override:
         tree = pathlib.Path(override)
         if not tree.is_dir():
-            raise RuntimeError(f"VIDIMUS_LEDGER_TREE is not a directory: {tree}")
+            raise RuntimeError(f"RECEIPT_LEDGER_TREE is not a directory: {tree}")
         return _authenticated_baseline_tree(tree)
     local = (
         pathlib.Path(__file__).resolve().parents[1]
