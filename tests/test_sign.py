@@ -24,8 +24,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
-import vidimus.sign as sign_module
-from vidimus.sign import (
+import receipt.sign as sign_module
+from receipt.sign import (
     KeyringSpec,
     KeySpec,
     ProducerKeySpec,
