@@ -2,7 +2,7 @@
 
 ## State
 
-All three signing layers are implemented and their focused suite is green. Packaging/docs and the final full differential run remain.
+All three signing layers are implemented and focused-green. Package metadata and documentation now describe the landed 0.2.0 capability; the final full run remains.
 
 ## Done
 
@@ -24,8 +24,9 @@ All three signing layers are implemented and their focused suite is green. Packa
 - Unknown IDs and mismatched fingerprints are preflight refusals even when other keys already satisfy the threshold.
 - Added exhaustive 2-of-3 acceptance/refusal tests, duplicate-presentation protection, both fingerprint schemes, absent/failed reporting, and domain separation.
 - Confirmed all 28 `tests/test_sign.py` cases pass.
+- Set the project version to 0.2.0, updated the README module row, and corrected the package status docstring. The ignored local `uv.lock` metadata was refreshed but is not part of the committed package surface.
+- Kept `vidimus.__version__` at 0.1.2 because the frozen existing package test requires that exact public value and existing assertions may not be edited.
 
 ## Next
 
-- Update package metadata and README after all capability tests pass.
 - Run the complete suite and sanity import, then write the final report.

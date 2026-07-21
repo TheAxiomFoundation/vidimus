@@ -12,7 +12,7 @@ Pre-release extraction target — nothing here verifies anything yet. The machin
 
 - `vidimus.chain` — append-only hash-chained manifests over record sets: enumerated genesis, content-addressed links, immutable-prefix verification
 - `vidimus.tsa` — RFC 3161 timestamps from independent authorities, two per record, with per-witness honest degradation (an unavailable witness is recorded with a reason, never silently skipped)
-- `vidimus.sign` — Ed25519 producer signatures verified against SPKI fingerprints pinned in the consumer's own committed code; N-of-M thresholds; rotation as an explicit recorded event
+- `vidimus.sign` — Ported ledger signature-verification primitives, Ed25519 sign-side helpers, N-of-M keyrings, and rotation by reviewed spec change
 - `vidimus.attest` — CI push attestation with self-anchoring enforcement epochs and a completeness sweep over every record-touching commit
 - `vidimus.ratchet` — shrink-only exception registries recomputed from live state; an excused failure that starts passing is an error until removed
 - `vidimus.chronology` — record-vs-event ordering tiers: does witnessed time prove the record existed *ante quem* — before the event it predicts or observes?
