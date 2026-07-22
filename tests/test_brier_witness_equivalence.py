@@ -72,7 +72,6 @@ import pytest
 from receipt.canonical import canonical_bytes
 from receipt.sign import SignError, spki_sha256, verify_signature_bytes
 from receipt.tsa import (
-    TokenEvidence,
     TrustBundleSpec,
     TsaError,
     TsaIdentitySpec,
