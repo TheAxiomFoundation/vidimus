@@ -4,14 +4,14 @@ Verifiable custody of agent-produced records.
 
 ## Status
 
-Shipped so far: the release-chain verifier, the append gate, ECMAScript-compatible canonical JSON, and standalone Ed25519 signing with consumer-pinned threshold keyrings. The machinery arrives by extraction from three production systems that each built it independently (pre-registered forecast records, an observation-ledger release chain, a signed statute corpus), behind a byte-equivalence gate: the extracted verifier must reproduce the source verifier's verdict, pass and fail alike, on the live production chain at a pinned commit before any system consumes the package. That gate has held end to end — the observation ledger consumes the package in production, with the differential harnesses re-proving equivalence on every package change.
+Shipped so far: the release-chain verifier, the append gate, ECMAScript-compatible canonical JSON, standalone Ed25519 signing with consumer-pinned threshold keyrings, RFC 3161 dual-witness verification, and workflow-provenance verification. The machinery arrives by extraction from three production systems that each built it independently (pre-registered forecast records, an observation-ledger release chain, a signed statute corpus), behind a byte-equivalence gate: the extracted verifier must reproduce the source verifier's verdict, pass and fail alike, on the live production chain at a pinned commit before any system consumes the package. That gate has held end to end — the observation ledger consumes the package in production, with the differential harnesses re-proving equivalence on every package change.
 
 ## What it provides (shipped rows) and what is still arriving
 
 - `receipt.chain` — append-only hash-chained manifests over record sets: enumerated genesis, content-addressed links, immutable-prefix verification
-- `receipt.tsa` — RFC 3161 timestamps from independent authorities, two per record, with per-witness honest degradation (an unavailable witness is recorded with a reason, never silently skipped)
+- `receipt.tsa` — RFC 3161 dual-witness verification against consumer-committed trust bundles and signer identities, with explicit unavailable-witness outcomes
 - `receipt.sign` — Ed25519 producer signatures verified against fingerprints pinned in the consumer's own committed code (shipped: ported ledger primitives, sign-side helpers, N-of-M keyrings with legacy verification generations — retired keys verify immutable history only; rotation by reviewed spec change)
-- `receipt.attest` — CI push attestation with self-anchoring enforcement epochs and a completeness sweep over every record-touching commit
+- `receipt.attest` — workflow-provenance verification with self-anchoring enforcement epochs and a full-history sweep over every protected-tree commit
 - `receipt.ratchet` — shrink-only exception registries recomputed from live state; an excused failure that starts passing is an error until removed
 - `receipt.chronology` — record-vs-event ordering tiers: does witnessed time prove the record existed *ante quem* — before the event it predicts or observes?
 - `receipt verify` — the outside auditor's command: a clone, commodity tools, one offline fail-closed verdict

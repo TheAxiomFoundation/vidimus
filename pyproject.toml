@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "receipt"
-version = "0.3.0"
+version = "0.4.0"
 description = "Verifiable custody of agent-produced records: chained manifests, dual RFC 3161 witnesses, pinned Ed25519 signatures, push attestation, chronology tiers, shrink-only waivers — one offline verification command"
 readme = "README.md"
 requires-python = ">=3.11"
